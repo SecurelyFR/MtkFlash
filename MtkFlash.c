@@ -1069,7 +1069,7 @@ int main(int argc, char **argv)
 	dbg_printf(0, "Synced with the DA\n\n");
 
 	/* Get expire date (no answer) */
-	da_dev_ctrl_get(fd_tty, mtk_da_dev_ctrl_get_expire_date, read_buf, READ_BUF_SIZE, 0);
+	//da_dev_ctrl_get(fd_tty, mtk_da_dev_ctrl_get_expire_date, read_buf, READ_BUF_SIZE, 0);
 
 	/* Set reset key */
 	read_buf[0] = 0x68;
