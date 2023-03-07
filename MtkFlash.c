@@ -1073,7 +1073,7 @@ int main(int argc, char **argv)
 	if (da_dev_ctrl_set(fd_tty, mtk_da_dev_ctrl_set_reset_key, read_buf, 4, 0) != 0) {
 		fprintf(stderr, "Error: failed to set reset key (DA)\n");
 		ret = -1;
-		goto out;
+		goto shutdown;
 	}
 
 	/* Set checksum level */
@@ -1084,7 +1084,7 @@ int main(int argc, char **argv)
 	if (da_dev_ctrl_set(fd_tty, mtk_da_dev_ctrl_set_checksum_level, read_buf, 4, 0) != 0) {
 		fprintf(stderr, "Error: failed to set checksum level (DA)\n");
 		ret = -1;
-		goto out;
+		goto shutdown;
 	}
 
 	/* Get connection agent */
@@ -1092,7 +1092,7 @@ int main(int argc, char **argv)
 	if (buf_size == 0) {
 		fprintf(stderr, "Error: failed to receive connection agent (DA)\n");
 		ret = -1;
-		goto out;
+		goto shutdown;
 	}
 
 	read_buf[buf_size] = '\0';
@@ -1104,7 +1104,7 @@ int main(int argc, char **argv)
 	if (strncmp((char *) read_buf, "preloader", buf_size) != 0) {
 		fprintf(stderr, "Error: connection mode %s not supported\n", read_buf);
 		ret = -1;
-		goto out;
+		goto shutdown;
 	}
 
 	/* Uploading stage 2 */
@@ -1113,20 +1113,20 @@ int main(int argc, char **argv)
 	if (!da2_data) {
 		fprintf(stderr, "Error: cannot allocate memory for DA2 data\n");
 		ret = -1;
-		goto out;
+		goto shutdown;
 	}
 
 	fseek(f_da, da2.data_offset, SEEK_SET);
 	if (fread(da2_data, 1, da2.size_int, f_da) != da2.size_int) {
 		fprintf(stderr, "Error: failed to read DA2 data\n");
 		ret = -1;
-		goto out;
+		goto shutdown;
 	}
 
 	if (da_send_data_check_status(fd_tty, mtk_da_cmd_boot_to, sizeof(mtk_da_cmd_boot_to), 0) < 0) {
 		fprintf(stderr, "Error: wrong status for mtk_da_cmd_boot_to (DA)\n");
 		ret = -1;
-		goto out;
+		goto shutdown;
 	}
 
 	boot_to_params[0] = da2.start_addr[3];
@@ -1153,7 +1153,7 @@ int main(int argc, char **argv)
 	if (da_send_data_check_status(fd_tty, da2_data, da2.size_int - da2.sig_len_int, 0) < 0) {
 		fprintf(stderr, "Error: wrong status for mtk_da_cmd_boot_to parameters (DA)\n");
 		ret = -1;
-		goto out;
+		goto shutdown;
 	}
 
 	free(da2_data);
@@ -1166,51 +1166,51 @@ int main(int argc, char **argv)
 	if (buf_size < 4 || read_buf[0] != mtk_da_cmd_sync[0] || read_buf[1] != mtk_da_cmd_sync[1] || read_buf[2] != mtk_da_cmd_sync[2] || read_buf[3] != mtk_da_cmd_sync[3]) {
 		fprintf(stderr, "Error: wrong sync status received (DA)\n");
 		ret = -1;
-		goto out;
+		goto shutdown;
 	}
 	dbg_printf(0, "DA stage 2 properly running and synced\n\n");
 
 	if (da_dev_ctrl_get(fd_tty, mtk_da_dev_ctrl_get_ram_info, read_buf, 48, 0) != 48) {
 		fprintf(stderr, "Error: failed to get RAM info (DA)\n");
 		ret = -1;
-		goto out;
+		goto shutdown;
 	}
 
 	if (da_dev_ctrl_get(fd_tty, mtk_da_dev_ctrl_get_emmc_info, read_buf, 96, 0) != 96) {
 		fprintf(stderr, "Error: failed to get EMMC info (DA)\n");
 		ret = -1;
-		goto out;
+		goto shutdown;
 	}
 
 	if (da_dev_ctrl_get(fd_tty, mtk_da_dev_ctrl_get_chip_id, read_buf, 12, 0) != 12) {
 		fprintf(stderr, "Error: failed to get chip ID (DA)\n");
 		ret = -1;
-		goto out;
+		goto shutdown;
 	}
 
 	if (da_dev_ctrl_get(fd_tty, mtk_da_dev_ctrl_get_da_version, read_buf, 3, 0) != 3) {
 		fprintf(stderr, "Error: failed to get DA version (DA)\n");
 		ret = -1;
-		goto out;
+		goto shutdown;
 	}
 
 	if (da_dev_ctrl_get(fd_tty, mtk_da_dev_ctrl_get_random_id, read_buf, 16, 0) != 16) {
 		fprintf(stderr, "Error: failed to get random ID (DA)\n");
 		ret = -1;
-		goto out;
+		goto shutdown;
 	}
 
 	if (da_dev_ctrl_get(fd_tty, mtk_da_dev_ctrl_get_usb_speed, read_buf, 10, 0) != 10) {
 		fprintf(stderr, "Error: failed to get USB speed (DA)\n");
 		ret = -1;
-		goto out;
+		goto shutdown;
 	}
 
 	/* Get read/write packet lengths */
 	if (da_dev_ctrl_get(fd_tty, mtk_da_dev_ctrl_get_packet_length, read_buf, 8, 0) != 8) {
 		fprintf(stderr, "Error: failed to get packet length (DA)\n");
 		ret = -1;
-		goto out;
+		goto shutdown;
 	}
 
 	da_packet_length_write = read_buf[3] | (read_buf[2] << 8) | (read_buf[1] << 16) | (read_buf[0] << 24);
@@ -1223,7 +1223,7 @@ int main(int argc, char **argv)
 	if (da_write_flash(fd_tty, 0x13e20000, file_data, padded_file_size, da_packet_length_write, 0) < 0) {
 		fprintf(stderr, "Error: failed to write file_data (DA)\n");
 		ret = -1;
-		goto out;
+		goto shutdown;
 	}
 	dbg_printf(0, "Successfully written\n\n");
 
@@ -1231,7 +1231,7 @@ int main(int argc, char **argv)
 	if (da_write_flash(fd_tty, 0x14320000, file_data, padded_file_size, da_packet_length_write, 0) < 0) {
 		fprintf(stderr, "Error: failed to write file_data (DA)\n");
 		ret = -1;
-		goto out;
+		goto shutdown;
 	}
 	dbg_printf(0, "Successfully written\n\n");
 
@@ -1239,13 +1239,14 @@ int main(int argc, char **argv)
 
 	//while (1) receive_data(fd_tty, read_buf, READ_BUF_SIZE, 1, 0);
 
-out:
+shutdown:
 	dbg_printf(0, "Sending shutdown request...\n");
 	if (da_shutdown(fd_tty, 0) < 0) {
 		fprintf(stderr, "Error: failed to shutdown the device (DA)\n");
 	}
 	dbg_printf(0, "The device can be unplugged\n\n");
 
+out:
 	if (da2_data != NULL) {
 		free(da2_data);
 	}
