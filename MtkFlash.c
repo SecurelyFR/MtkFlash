@@ -300,6 +300,11 @@ static size_t send_data(int fd, unsigned char *buf, size_t buf_size)
 		return 0;
 	}
 
+#ifdef __APPLE__
+	/* Slow down the data flow to avoid some kind of overrun on Apple */
+	usleep(1000);
+#endif
+
 	if (is_print_enabled(2)) {
 		hex_dump(buf, buf_size, '>');
 	}
