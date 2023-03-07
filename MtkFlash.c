@@ -836,6 +836,7 @@ int main(int argc, char **argv)
 	while (stat(tty_path, &st) == -1) {
 		usleep(100000); // wait for 100 ms
 	}
+	usleep(100000); // Make sure the device is not busy (par Apple mainly)
 
 	fd_tty = open(tty_path, O_RDWR | O_NOCTTY | O_SYNC /*| O_NONBLOCK*/);
 	if (fd_tty < 0) {
