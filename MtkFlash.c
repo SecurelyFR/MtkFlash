@@ -799,7 +799,7 @@ int main(int argc, char **argv)
 
 	fseek(f_file, 0, SEEK_END);
 	file_size = ftell(f_file);
-	padded_file_size = (file_size + (0x200 - 1) & ~(0x200 - 1));
+	padded_file_size = (file_size + (0x200 - 1)) & ~(0x200 - 1);
 	fseek(f_file, 0, SEEK_SET);
 
 	dbg_printf(1, "Loading file %s with a size of %u bytes padded to %u bytes\n\n", file_path, file_size, padded_file_size);
