@@ -409,6 +409,8 @@ static int da_send_data_check_status(int fd, unsigned char *buf, size_t buf_size
 		fprintf(stderr, "Error: wrong status received 0x%x\n", status);
 		return -1;
 	}
+
+	return 0;
 }
 
 static int da_dev_ctrl_set(int fd, unsigned char *cmd, unsigned char *buf, size_t buf_size, unsigned int timeout_sec)
