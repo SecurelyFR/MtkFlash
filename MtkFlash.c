@@ -154,6 +154,8 @@ static unsigned char mtk_da_dev_ctrl_get_dev_fw_info[] = {0x13, 0x00, 0x04, 0x00
 static unsigned char mtk_da_dev_ctrl_get_hrid[] = {0x14, 0x00, 0x04, 0x00};			//0x040014
 static unsigned char mtk_da_dev_ctrl_get_error_detail[] = {0x15, 0x00, 0x04, 0x00};		//0x040015
 
+static unsigned char read_buf[READ_BUF_SIZE];
+
 
 static int is_print_enabled(unsigned int level)
 {
@@ -737,7 +739,6 @@ int main(int argc, char **argv)
 	int fd_tty = -1;
 	FILE *f_da = NULL;
 	FILE *f_file = NULL;
-	unsigned char read_buf[READ_BUF_SIZE];
 	unsigned char *read_buf_addr = read_buf;
 	int ret = 0;
 	unsigned int i;
