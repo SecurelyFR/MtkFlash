@@ -265,6 +265,39 @@ static void hex_dump(unsigned char *buf, size_t size, char indicator)
 	dbg_printf(2, "\n\n");
 }
 
+static void show_progress(unsigned int current, unsigned int total, unsigned int length)
+{
+	unsigned int i;
+	unsigned int steps = length - ((total - current) * length)/total;
+
+	if (is_print_enabled(2)) {
+		/* No progress bar when hex dump is enabled */
+		return;
+	}
+
+	dbg_printf(0, "\33[2K\r[");
+
+	for (i = 0; i < steps; i++) {
+		dbg_printf(0, "\xE2\x96\x92");
+	}
+
+	for (i = steps; i < length; i++) {
+		dbg_printf(0, " ");
+	}
+
+	dbg_printf(0, "] %02u%%", (current * 100)/total);
+}
+
+static void clear_progress(void)
+{
+	if (is_print_enabled(2)) {
+		/* No progress bar when hex dump is enabled */
+		return;
+	}
+
+	dbg_printf(0, "\n");
+}
+
 static size_t receive_data(int fd, unsigned char *buf, size_t buf_size, size_t min_size, unsigned int timeout_sec)
 {
 	fd_set rfds;
@@ -351,6 +384,7 @@ static int preloader_sync(int fd, unsigned int timeout_sec)
 static int upload_da_stage1(int fd, FILE *f_da, da_info_t *da, unsigned int timeout_sec)
 {
 	size_t buf_size;
+	unsigned int da_size = da->size_int;
 
 	dbg_printf(0, "Sending the DA (stage 1) to the device...\n");
 
@@ -395,11 +429,14 @@ static int upload_da_stage1(int fd, FILE *f_da, da_info_t *da, unsigned int time
 	/* Send the actual DA data */
 	fseek(f_da, da->data_offset, SEEK_SET);
 
-	while (da->size_int > 0) {
-		buf_size = fread(read_buf, 1, (da->size_int > READ_BUF_SIZE) ? READ_BUF_SIZE : da->size_int, f_da);
+	while (da_size > 0) {
+		buf_size = fread(read_buf, 1, (da_size > READ_BUF_SIZE) ? READ_BUF_SIZE : da_size, f_da);
 		send_data(fd, read_buf, buf_size);
-		da->size_int -= buf_size;
+		da_size -= buf_size;
+		show_progress(da->size_int - da_size, da->size_int, 80);
 	}
+
+	clear_progress();
 
 	/* Get the checksum computed by the device and verify it */
 	buf_size = receive_data(fd, read_buf, 2, 2, timeout_sec);
@@ -459,10 +496,11 @@ static size_t da_receive_data(int fd, unsigned char **buf, size_t buf_size, unsi
 	return receive_data(fd, *buf, length, length, timeout_sec);
 }
 
-static void da_send_data(int fd, unsigned char *buf, size_t buf_size)
+static void da_send_data(int fd, unsigned char *buf, size_t buf_size, unsigned int progress)
 {
 	unsigned char size[4];
 	size_t sent_size = 0;
+	size_t total_size = buf_size;
 
 	size[0] = buf_size & 0xFF;
 	size[1] = (buf_size >> 8) & 0xFF;
@@ -477,6 +515,13 @@ static void da_send_data(int fd, unsigned char *buf, size_t buf_size)
 		sent_size = send_data(fd, buf, (buf_size > 0x200) ? 0x200 : buf_size);
 		buf_size -= sent_size;
 		buf += sent_size;
+		if (progress) {
+			show_progress(total_size - buf_size, total_size, 80);
+		}
+	}
+
+	if (progress) {
+		clear_progress();
 	}
 }
 
@@ -511,11 +556,11 @@ static size_t da_receive_data_check_status(int fd, unsigned char *buf, size_t bu
 	return length;
 }
 
-static int da_send_data_check_status(int fd, unsigned char *buf, size_t buf_size, unsigned int timeout_sec)
+static int da_send_data_check_status(int fd, unsigned char *buf, size_t buf_size, unsigned int timeout_sec, unsigned int progress)
 {
 	unsigned int status;
 
-	da_send_data(fd, buf, buf_size);
+	da_send_data(fd, buf, buf_size, progress);
 	status = da_get_status(fd, timeout_sec);
 	if (status != DA_STATUS_OK) {
 		fprintf(stderr, "Error: wrong status received 0x%x\n", status);
@@ -532,18 +577,18 @@ static int da_sync_stage1(int fd, unsigned int timeout_sec)
 
 	dbg_printf(0, "Syncing with the DA (stage1)...\n");
 
-	da_send_data(fd, mtk_da_cmd_sync, sizeof(mtk_da_cmd_sync));
+	da_send_data(fd, mtk_da_cmd_sync, sizeof(mtk_da_cmd_sync), 0);
 
 	/* Setting-up environment */
-	da_send_data(fd, mtk_da_cmd_set_env, sizeof(mtk_da_cmd_set_env));
-	if (da_send_data_check_status(fd, mtk_da_env_params, sizeof(mtk_da_env_params), timeout_sec) < 0) {
+	da_send_data(fd, mtk_da_cmd_set_env, sizeof(mtk_da_cmd_set_env), 0);
+	if (da_send_data_check_status(fd, mtk_da_env_params, sizeof(mtk_da_env_params), timeout_sec, 0) < 0) {
 		fprintf(stderr, "Error: wrong status for mtk_da_cmd_set_env (DA)\n");
 		return -1;
 	}
 
 	/* HW inititialization */
-	da_send_data(fd, mtk_da_cmd_hw_init, sizeof(mtk_da_cmd_hw_init));
-	if (da_send_data_check_status(fd, mtk_da_hw_init_params, sizeof(mtk_da_hw_init_params), timeout_sec) < 0) {
+	da_send_data(fd, mtk_da_cmd_hw_init, sizeof(mtk_da_cmd_hw_init), 0);
+	if (da_send_data_check_status(fd, mtk_da_hw_init_params, sizeof(mtk_da_hw_init_params), timeout_sec, 0) < 0) {
 		fprintf(stderr, "Error: wrong status for mtk_da_cmd_hw_init (DA)\n");
 		return -1;
 	}
@@ -623,7 +668,7 @@ static int da_upload_and_sync_stage2(int fd, FILE *f_da, da_info_t *da, unsigned
 		return -1;
 	}
 
-	if (da_send_data_check_status(fd, mtk_da_cmd_boot_to, sizeof(mtk_da_cmd_boot_to), timeout_sec) < 0) {
+	if (da_send_data_check_status(fd, mtk_da_cmd_boot_to, sizeof(mtk_da_cmd_boot_to), timeout_sec, 0) < 0) {
 		fprintf(stderr, "Error: wrong status for mtk_da_cmd_boot_to (DA)\n");
 		free(da2_data);
 		return -1;
@@ -647,10 +692,10 @@ static int da_upload_and_sync_stage2(int fd, FILE *f_da, da_info_t *da, unsigned
 	boot_to_params[14] = 0x00;
 	boot_to_params[15] = 0x00;
 
-	da_send_data(fd, boot_to_params, sizeof(boot_to_params));
+	da_send_data(fd, boot_to_params, sizeof(boot_to_params), 0);
 
 	/* Upload the actual data without the signature */
-	if (da_send_data_check_status(fd, da2_data, da->size_int - da->sig_len_int, timeout_sec) < 0) {
+	if (da_send_data_check_status(fd, da2_data, da->size_int - da->sig_len_int, timeout_sec, 1) < 0) {
 		fprintf(stderr, "Error: wrong status for mtk_da_cmd_boot_to parameters (DA)\n");
 		free(da2_data);
 		return -1;
@@ -674,17 +719,17 @@ static int da_upload_and_sync_stage2(int fd, FILE *f_da, da_info_t *da, unsigned
 
 static int da_dev_ctrl_set(int fd, unsigned char *cmd, unsigned char *buf, size_t buf_size, unsigned int timeout_sec)
 {
-	if (da_send_data_check_status(fd, mtk_da_cmd_dev_ctrl, sizeof(mtk_da_cmd_dev_ctrl), timeout_sec) < 0) {
+	if (da_send_data_check_status(fd, mtk_da_cmd_dev_ctrl, sizeof(mtk_da_cmd_dev_ctrl), timeout_sec, 0) < 0) {
 		fprintf(stderr, "Error: wrong status for mtk_da_cmd_dev_ctrl\n");
 		return -1;
 	}
 
-	if (da_send_data_check_status(fd, cmd, 4, timeout_sec) < 0) {
+	if (da_send_data_check_status(fd, cmd, 4, timeout_sec, 0) < 0) {
 		fprintf(stderr, "Error: wrong status for command (mtk_da_cmd_dev_ctrl)\n");
 		return -1;
 	}
 
-	if (da_send_data_check_status(fd, buf, buf_size, timeout_sec) < 0) {
+	if (da_send_data_check_status(fd, buf, buf_size, timeout_sec, 0) < 0) {
 		fprintf(stderr, "Error: wrong status for parameters (mtk_da_cmd_dev_ctrl)\n");
 		return -1;
 	}
@@ -694,12 +739,12 @@ static int da_dev_ctrl_set(int fd, unsigned char *cmd, unsigned char *buf, size_
 
 static size_t da_dev_ctrl_get(int fd, unsigned char *cmd, unsigned char *buf, size_t buf_size, unsigned int timeout_sec)
 {
-	if (da_send_data_check_status(fd, mtk_da_cmd_dev_ctrl, sizeof(mtk_da_cmd_dev_ctrl), timeout_sec) < 0) {
+	if (da_send_data_check_status(fd, mtk_da_cmd_dev_ctrl, sizeof(mtk_da_cmd_dev_ctrl), timeout_sec, 0) < 0) {
 		fprintf(stderr, "Error: wrong status for mtk_da_cmd_dev_ctrl\n");
 		return 0;
 	}
 
-	if (da_send_data_check_status(fd, cmd, 4, timeout_sec) < 0) {
+	if (da_send_data_check_status(fd, cmd, 4, timeout_sec, 0) < 0) {
 		fprintf(stderr, "Error: wrong status for DEV CTRL command (mtk_da_cmd_dev_ctrl)\n");
 		return 0;
 	}
@@ -712,6 +757,7 @@ static int da_read_flash(int fd, size_t address, size_t length, unsigned char *b
 	unsigned char params[56] = {0};
 	unsigned char ack[4] = {0};
 	unsigned char *read_buf = NULL;
+	size_t total_length = length;
 	size_t read_size;
 
 	/* TODO: support more storage */
@@ -747,12 +793,12 @@ static int da_read_flash(int fd, size_t address, size_t length, unsigned char *b
 	params[22] = (length >> 48) & 0xFF;
 	params[23] = (length >> 56) & 0xFF;
 
-	if (da_send_data_check_status(fd, mtk_da_cmd_read_data, sizeof(mtk_da_cmd_read_data), timeout_sec) < 0) {
+	if (da_send_data_check_status(fd, mtk_da_cmd_read_data, sizeof(mtk_da_cmd_read_data), timeout_sec, 0) < 0) {
 		fprintf(stderr, "Error: wrong status for mtk_da_cmd_read_data (DA)\n");
 		return -1;
 	}
 
-	if (da_send_data_check_status(fd, params, sizeof(params), timeout_sec) < 0) {
+	if (da_send_data_check_status(fd, params, sizeof(params), timeout_sec, 0) < 0) {
 		fprintf(stderr, "Error: wrong status for mtk_da_cmd_read_data params (DA)\n");
 		return -1;
 	}
@@ -778,11 +824,15 @@ static int da_read_flash(int fd, size_t address, size_t length, unsigned char *b
 		}
 
 		/* Send an ACK and wait for the status */
-		if (da_send_data_check_status(fd, ack, sizeof(ack), timeout_sec) < 0) {
+		if (da_send_data_check_status(fd, ack, sizeof(ack), timeout_sec, 0) < 0) {
 			fprintf(stderr, "Error: wrong status for mtk_da_cmd_read_data ack (DA)\n");
 			return -1;
 		}
+
+		show_progress(total_length - length, total_length, 80);
 	}
+
+	clear_progress();
 
 	return 0;
 }
@@ -794,6 +844,7 @@ static int da_write_flash(int fd, size_t address, unsigned char *buf, size_t len
 	unsigned char checksum[4] = {0};
 	unsigned int checksum_int = 0;
 	size_t packet_len = 0;
+	size_t total_length = length;
 	size_t i;
 
 	/* TODO: support more storage */
@@ -829,12 +880,12 @@ static int da_write_flash(int fd, size_t address, unsigned char *buf, size_t len
 	params[22] = (length >> 48) & 0xFF;
 	params[23] = (length >> 56) & 0xFF;
 
-	if (da_send_data_check_status(fd, mtk_da_cmd_write_data, sizeof(mtk_da_cmd_write_data), timeout_sec) < 0) {
+	if (da_send_data_check_status(fd, mtk_da_cmd_write_data, sizeof(mtk_da_cmd_write_data), timeout_sec, 0) < 0) {
 		fprintf(stderr, "Error: wrong status for mtk_da_cmd_write_data (DA)\n");
 		return -1;
 	}
 
-	if (da_send_data_check_status(fd, params, sizeof(params), timeout_sec) < 0) {
+	if (da_send_data_check_status(fd, params, sizeof(params), timeout_sec, 0) < 0) {
 		fprintf(stderr, "Error: wrong status for mtk_da_cmd_write_data params (DA)\n");
 		return -1;
 	}
@@ -854,17 +905,21 @@ static int da_write_flash(int fd, size_t address, unsigned char *buf, size_t len
 		dbg_printf(3, "Packet length is %u bytes, checksum is 0x%x\n", packet_len, checksum_int);
 
 		/* Send the chunk */
-		da_send_data(fd, ack, sizeof(ack));
-		da_send_data(fd, checksum, sizeof(checksum));
+		da_send_data(fd, ack, sizeof(ack), 0);
+		da_send_data(fd, checksum, sizeof(checksum), 0);
 
-		if (da_send_data_check_status(fd, buf, packet_len, timeout_sec) < 0) {
+		if (da_send_data_check_status(fd, buf, packet_len, timeout_sec, 0) < 0) {
 			fprintf(stderr, "Error: wrong status for mtk_da_cmd_write_data chunk with %lu bytes remaining (DA)\n", length);
 			return -1;
 		}
 
 		length -= packet_len;
 		buf += packet_len;
+
+		show_progress(total_length - length, total_length, 80);
 	}
+
+	clear_progress();
 
 	return 0;
 }
@@ -873,12 +928,12 @@ static int da_shutdown(int fd, unsigned int timeout_sec)
 {
 	unsigned char params[32] = {0}; // bootmode = shutdown
 
-	if (da_send_data_check_status(fd, mtk_da_cmd_shutdown, sizeof(mtk_da_cmd_shutdown), timeout_sec) < 0) {
+	if (da_send_data_check_status(fd, mtk_da_cmd_shutdown, sizeof(mtk_da_cmd_shutdown), timeout_sec, 0) < 0) {
 		fprintf(stderr, "Error: wrong status for mtk_da_cmd_shutdown (DA)\n");
 		return -1;
 	}
 
-	if (da_send_data_check_status(fd, params, sizeof(params), timeout_sec) < 0) {
+	if (da_send_data_check_status(fd, params, sizeof(params), timeout_sec, 0) < 0) {
 		fprintf(stderr, "Error: wrong status for mtk_da_cmd_shutdown params (DA)\n");
 		return -1;
 	}
