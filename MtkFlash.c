@@ -314,6 +314,116 @@ static size_t send_data(int fd, unsigned char *buf, size_t buf_size)
 	return buf_size;
 }
 
+static int preloader_sync(int fd, unsigned int timeout_sec)
+{
+	size_t buf_size;
+	unsigned int i;
+
+	dbg_printf(0, "Syncing with the device...\n");
+
+	while (1) {
+		/* Send the first byte of the START magic in loop until we get a reply */
+		send_data(fd, mtk_cmd_start, 1);
+		buf_size = receive_data(fd, read_buf, 1, 1, timeout_sec);
+		if (*read_buf == mtk_cmd_start_reply[0]) {
+			break;
+		}
+
+		usleep(10000); // wait for 100 ms
+		// TODO Add timeout
+	}
+
+	/* We are now synced, send the remaining bytes of the start command */
+	for (i = 1; i < sizeof(mtk_cmd_start); i++) {
+		send_data(fd, &mtk_cmd_start[i], 1);
+		buf_size = receive_data(fd, read_buf, 1, 1, timeout_sec);
+		if (*read_buf != mtk_cmd_start_reply[i]) {
+			fprintf(stderr, "Wrong reply !\n");
+			return -1;
+		}
+	}
+
+	dbg_printf(0, "Device is now synced and accepts commands\n\n");
+
+	return 0;
+}
+
+static int upload_da_stage1(int fd, FILE *f_da, da_info_t *da, unsigned int timeout_sec)
+{
+	size_t buf_size;
+
+	dbg_printf(0, "Sending the DA (stage 1) to the device...\n");
+
+	send_data(fd, mtk_cmd_send_da, 1);
+	buf_size = receive_data(fd, read_buf, 1, 1, timeout_sec);
+	if (buf_size < 1 || read_buf[0] != mtk_cmd_send_da[0]) {
+		fprintf(stderr, "Error: wrong reply to mtk_cmd_send_da\n");
+		return -1;
+	}
+
+	/* Set the address of the DA */
+	send_data(fd, da->start_addr, 4);
+	buf_size = receive_data(fd, read_buf, 4, 4, timeout_sec);
+	if (buf_size < 4 || read_buf[0] != da->start_addr[0] || read_buf[1] != da->start_addr[1] || read_buf[2] != da->start_addr[2] || read_buf[3] != da->start_addr[3]) {
+		fprintf(stderr, "Error: wrong reply to da->start_addr\n");
+		return -1;
+	}
+
+	/* Set the size of the DA */
+	send_data(fd, da->size, 4);
+	buf_size = receive_data(fd, read_buf, 4, 4, timeout_sec);
+	if (buf_size < 4 || read_buf[0] != da->size[0] || read_buf[1] != da->size[1] || read_buf[2] != da->size[2] || read_buf[3] != da->size[3]) {
+		fprintf(stderr, "Error: wrong reply to da->size\n");
+		return -1;
+	}
+
+	/* Set the signature length of the DA */
+	send_data(fd, da->sig_len, 4);
+	buf_size = receive_data(fd, read_buf, 4, 4, timeout_sec);
+	if (buf_size < 4 || read_buf[0] != da->sig_len[0] || read_buf[1] != da->sig_len[1] || read_buf[2] != da->sig_len[2] || read_buf[3] != da->sig_len[3]) {
+		fprintf(stderr, "Error: wrong reply to da->sig_len\n");
+		return -1;
+	}
+
+	/* Get the status */
+	buf_size = receive_data(fd, read_buf, 2, 2, timeout_sec);
+	if (buf_size < 2 || read_buf[0] != 0x00 || read_buf[1] != 0x00) {
+		fprintf(stderr, "Error: wrong mtk_cmd_send_da status\n");
+		return -1;
+	}
+
+	/* Send the actual DA data */
+	fseek(f_da, da->data_offset, SEEK_SET);
+
+	while (da->size_int > 0) {
+		buf_size = fread(read_buf, 1, (da->size_int > READ_BUF_SIZE) ? READ_BUF_SIZE : da->size_int, f_da);
+		send_data(fd, read_buf, buf_size);
+		da->size_int -= buf_size;
+	}
+
+	/* Get the checksum computed by the device and verify it */
+	buf_size = receive_data(fd, read_buf, 2, 2, timeout_sec);
+	if (buf_size < 2) {
+		fprintf(stderr, "Error: wrong DA checksum received\n");
+		return -1;
+	}
+	dbg_printf(1, "Received DA checksum: %02x%02x\n", read_buf[0], read_buf[1]);
+
+	/* TODO checksum verification */
+
+	/* Get the upload status */
+	buf_size = receive_data(fd, read_buf, 2, 2, timeout_sec);
+	if (buf_size < 2 || read_buf[0] != 0x00 || read_buf[1] != 0x00) {
+		fprintf(stderr, "Error: wrong DA upload status\n");
+		return -1;
+	}
+
+	dbg_printf(1, "Received DA upload status: %02x%02x\n", read_buf[0], read_buf[1]);
+	dbg_printf(0, "The DA has been successfully uploaded\n\n");
+
+	return 0;
+}
+
 static size_t da_receive_data(int fd, unsigned char **buf, size_t buf_size, unsigned int timeout_sec)
 {
 	unsigned char header_buf[12];
@@ -411,6 +521,153 @@ static int da_send_data_check_status(int fd, unsigned char *buf, size_t buf_size
 		fprintf(stderr, "Error: wrong status received 0x%x\n", status);
 		return -1;
 	}
+
+	return 0;
+}
+
+static int da_sync_stage1(int fd, unsigned int timeout_sec)
+{
+	size_t buf_size;
+	unsigned char *read_buf_addr = read_buf;
+
+	dbg_printf(0, "Syncing with the DA (stage1)...\n");
+
+	da_send_data(fd, mtk_da_cmd_sync, sizeof(mtk_da_cmd_sync));
+
+	/* Setting-up environment */
+	da_send_data(fd, mtk_da_cmd_set_env, sizeof(mtk_da_cmd_set_env));
+	if (da_send_data_check_status(fd, mtk_da_env_params, sizeof(mtk_da_env_params), timeout_sec) < 0) {
+		fprintf(stderr, "Error: wrong status for mtk_da_cmd_set_env (DA)\n");
+		return -1;
+	}
+
+	/* HW inititialization */
+	da_send_data(fd, mtk_da_cmd_hw_init, sizeof(mtk_da_cmd_hw_init));
+	if (da_send_data_check_status(fd, mtk_da_hw_init_params, sizeof(mtk_da_hw_init_params), timeout_sec) < 0) {
+		fprintf(stderr, "Error: wrong status for mtk_da_cmd_hw_init (DA)\n");
+		return -1;
+	}
+
+	/* Check syncing has been successful */
+	buf_size = da_receive_data(fd, &read_buf_addr, sizeof(mtk_da_cmd_sync), timeout_sec);
+	if (buf_size < 4 || read_buf[0] != mtk_da_cmd_sync[0] || read_buf[1] != mtk_da_cmd_sync[1] || read_buf[2] != mtk_da_cmd_sync[2] || read_buf[3] != mtk_da_cmd_sync[3]) {
+		fprintf(stderr, "Error: wrong sync status received (DA)\n");
+		return -1;
+	}
+
+	dbg_printf(0, "Synced with the DA (stage1)\n\n");
+
+	return 0;
+}
+
+static int da_jump_stage1(int fd, da_info_t *da, unsigned int timeout_sec)
+{
+	size_t buf_size;
+
+	dbg_printf(0, "Jumping to the DA (stage1)...\n");
+
+	send_data(fd, mtk_cmd_jump_da, 1);
+	buf_size = receive_data(fd, read_buf, 1, 1, timeout_sec);
+	if (buf_size < 1 || read_buf[0] != mtk_cmd_jump_da[0]) {
+		fprintf(stderr, "Error: wrong reply to mtk_cmd_jump_da\n");
+		return -1;
+	}
+
+	/* Set the address of the DA for the jump */
+	send_data(fd, da->start_addr, 4);
+	buf_size = receive_data(fd, read_buf, 4, 4, timeout_sec);
+	if (buf_size < 4 || read_buf[0] != da->start_addr[0] || read_buf[1] != da->start_addr[1] || read_buf[2] != da->start_addr[2] || read_buf[3] != da->start_addr[3]) {
+		fprintf(stderr, "Error: wrong reply to da->start_addr\n");
+		return -1;
+	}
+
+	/* Get the status before the jump */
+	buf_size = receive_data(fd, read_buf, 2, 2, timeout_sec);
+	if (buf_size < 2 || read_buf[0] != 0x00 || read_buf[1] != 0x00) {
+		fprintf(stderr, "Error: wrong mtk_cmd_jump_da status\n");
+		return -1;
+	}
+
+	/* Get the DA sync byte */
+	buf_size = receive_data(fd, read_buf, 1, 1, timeout_sec);
+	if (buf_size < 1 || read_buf[0] != DA_SYNC) {
+		fprintf(stderr, "Error: wrong DA sync byte\n");
+		return -1;
+	}
+
+	dbg_printf(0, "DA (stage1) properly started\n\n");
+
+	return 0;
+}
+
+static int da_upload_and_sync_stage2(int fd, FILE *f_da, da_info_t *da, unsigned int timeout_sec)
+{
+	size_t buf_size;
+	unsigned char *read_buf_addr = read_buf;
+	unsigned char *da2_data;
+	unsigned char boot_to_params[16];
+
+	dbg_printf(0, "Uploading DA (stage 2)...\n");
+
+	da2_data = (unsigned char *) malloc(da->size_int);
+	if (!da2_data) {
+		fprintf(stderr, "Error: cannot allocate memory for DA2 data\n");
+		free(da2_data);
+		return -1;
+	}
+
+	fseek(f_da, da->data_offset, SEEK_SET);
+	if (fread(da2_data, 1, da->size_int, f_da) != da->size_int) {
+		fprintf(stderr, "Error: failed to read DA2 data\n");
+		free(da2_data);
+		return -1;
+	}
+
+	if (da_send_data_check_status(fd, mtk_da_cmd_boot_to, sizeof(mtk_da_cmd_boot_to), timeout_sec) < 0) {
+		fprintf(stderr, "Error: wrong status for mtk_da_cmd_boot_to (DA)\n");
+		free(da2_data);
+		return -1;
+	}
+
+	boot_to_params[0] = da->start_addr[3];
+	boot_to_params[1] = da->start_addr[2];
+	boot_to_params[2] = da->start_addr[1];
+	boot_to_params[3] = da->start_addr[0];
+	boot_to_params[4] = 0x00;
+	boot_to_params[5] = 0x00;
+	boot_to_params[6] = 0x00;
+	boot_to_params[7] = 0x00;
+
+	boot_to_params[8] = da->size[3];
+	boot_to_params[9] = da->size[2];
+	boot_to_params[10] = da->size[1];
+	boot_to_params[11] = da->size[0];
+	boot_to_params[12] = 0x00;
+	boot_to_params[13] = 0x00;
+	boot_to_params[14] = 0x00;
+	boot_to_params[15] = 0x00;
+
+	da_send_data(fd, boot_to_params, sizeof(boot_to_params));
+
+	/* Upload the actual data without the signature */
+	if (da_send_data_check_status(fd, da2_data, da->size_int - da->sig_len_int, timeout_sec) < 0) {
+		fprintf(stderr, "Error: wrong status for mtk_da_cmd_boot_to parameters (DA)\n");
+		free(da2_data);
+		return -1;
+	}
+
+	free(da2_data);
+
+	dbg_printf(0, "DA (stage 2) properly uploaded, jumping to it...\n");
+
+	/* Check if the jump has been successful */
+	buf_size = da_receive_data(fd, &read_buf_addr, sizeof(mtk_da_cmd_sync), timeout_sec);
+	if (buf_size < 4 || read_buf[0] != mtk_da_cmd_sync[0] || read_buf[1] != mtk_da_cmd_sync[1] || read_buf[2] != mtk_da_cmd_sync[2] || read_buf[3] != mtk_da_cmd_sync[3]) {
+		fprintf(stderr, "Error: wrong sync status received (DA)\n");
+		return -1;
+	}
+
+	dbg_printf(0, "DA (stage 2) properly running and synced\n\n");
 
 	return 0;
 }
@@ -739,14 +996,10 @@ int main(int argc, char **argv)
 	int fd_tty = -1;
 	FILE *f_da = NULL;
 	FILE *f_file = NULL;
-	unsigned char *read_buf_addr = read_buf;
 	int ret = 0;
-	unsigned int i;
 	struct stat st;
 	size_t buf_size;
 	da_info_t da1, da2;
-	unsigned char boot_to_params[16];
-	unsigned char *da2_data = NULL;
 	unsigned int da_packet_length_write = 0, da_packet_length_read = 0;
 	unsigned char *file_data = NULL;
 	size_t file_size = 0;
@@ -875,30 +1128,11 @@ int main(int argc, char **argv)
 	tcflush(fd_tty, TCIOFLUSH);
 
 	/* Sync with the device */
-	dbg_printf(0, "Syncing with the device...\n");
-	while (1) {
-		/* Send the first byte of the START magic in loop until we get a reply */
-		send_data(fd_tty, mtk_cmd_start, 1);
-		buf_size = receive_data(fd_tty, read_buf, 1, 1, 0);
-		if (*read_buf == mtk_cmd_start_reply[0]) {
-			break;
-		}
-
-		usleep(10000); // wait for 100 ms
-		// TODO Add timeout
+	if (preloader_sync(fd_tty, 0) < 0) {
+		fprintf(stderr, "Error: failed sync with the device\n");
+		ret = -1;
+		goto out;
 	}
-
-	/* We are now synced, send the remaining bytes of the start command */
-	for (i = 1; i < sizeof(mtk_cmd_start); i++) {
-		send_data(fd_tty, &mtk_cmd_start[i], 1);
-		buf_size = receive_data(fd_tty, read_buf, 1, 1, 0);
-		if (*read_buf != mtk_cmd_start_reply[i]) {
-			fprintf(stderr, "Wrong reply !\n");
-			ret = -1;
-			goto out;
-		}
-	}
-	dbg_printf(0, "Device is now synced and accepts commands\n\n");
 
 	/* We can start sending actual commands */
 	/* Get the bootloader version */
@@ -932,144 +1166,25 @@ int main(int argc, char **argv)
 	dbg_printf(0, "HW/SW version: %02x%02x%02x%02x%02x%02x%02x%02x\n\n", read_buf[1], read_buf[2], read_buf[3], read_buf[4], read_buf[5], read_buf[6], read_buf[7], read_buf[8]);
 
 	/* Send the DA */
-	dbg_printf(0, "Sending the DA to the device...\n");
-	send_data(fd_tty, mtk_cmd_send_da, 1);
-	buf_size = receive_data(fd_tty, read_buf, 1, 1, 0);
-	if (buf_size < 1 || read_buf[0] != mtk_cmd_send_da[0]) {
-		fprintf(stderr, "Error: wrong reply to mtk_cmd_send_da\n");
+	if (upload_da_stage1(fd_tty, f_da, &da1, 0) < 0) {
+		fprintf(stderr, "Error: failed to upload the DA (stage 1)\n");
 		ret = -1;
 		goto out;
 	}
-
-	/* Set the address of the DA */
-	send_data(fd_tty, da1.start_addr, 4);
-	buf_size = receive_data(fd_tty, read_buf, 4, 4, 0);
-	if (buf_size < 4 || read_buf[0] != da1.start_addr[0] || read_buf[1] != da1.start_addr[1] || read_buf[2] != da1.start_addr[2] || read_buf[3] != da1.start_addr[3]) {
-		fprintf(stderr, "Error: wrong reply to da1.start_addr\n");
-		ret = -1;
-		goto out;
-	}
-
-	/* Set the size of the DA */
-	send_data(fd_tty, da1.size, 4);
-	buf_size = receive_data(fd_tty, read_buf, 4, 4, 0);
-	if (buf_size < 4 || read_buf[0] != da1.size[0] || read_buf[1] != da1.size[1] || read_buf[2] != da1.size[2] || read_buf[3] != da1.size[3]) {
-		fprintf(stderr, "Error: wrong reply to da1.size\n");
-		ret = -1;
-		goto out;
-	}
-
-	/* Set the signature length of the DA */
-	send_data(fd_tty, da1.sig_len, 4);
-	buf_size = receive_data(fd_tty, read_buf, 4, 4, 0);
-	if (buf_size < 4 || read_buf[0] != da1.sig_len[0] || read_buf[1] != da1.sig_len[1] || read_buf[2] != da1.sig_len[2] || read_buf[3] != da1.sig_len[3]) {
-		fprintf(stderr, "Error: wrong reply to da1.sig_len\n");
-		ret = -1;
-		goto out;
-	}
-
-	/* Get the status */
-	buf_size = receive_data(fd_tty, read_buf, 2, 2, 0);
-	if (buf_size < 2 || read_buf[0] != 0x00 || read_buf[1] != 0x00) {
-		fprintf(stderr, "Error: wrong mtk_cmd_send_da status\n");
-		ret = -1;
-		goto out;
-	}
-
-	/* Send the actual DA data */
-	fseek(f_da, da1.data_offset, SEEK_SET);
-
-	while (da1.size_int > 0) {
-		buf_size = fread(read_buf, 1, (da1.size_int > READ_BUF_SIZE) ? READ_BUF_SIZE : da1.size_int, f_da);
-		send_data(fd_tty, read_buf, buf_size);
-		da1.size_int -= buf_size;
-	}
-
-	/* Get the checksum computed by the device and verify it */
-	buf_size = receive_data(fd_tty, read_buf, 2, 2, 0);
-	if (buf_size < 2) {
-		fprintf(stderr, "Error: wrong DA checksum received\n");
-		ret = -1;
-		goto out;
-	}
-	dbg_printf(1, "Received DA checksum: %02x%02x\n", read_buf[0], read_buf[1]);
-
-	/* TODO checksum verification */
-
-	/* Get the upload status */
-	buf_size = receive_data(fd_tty, read_buf, 2, 2, 0);
-	if (buf_size < 2 || read_buf[0] != 0x00 || read_buf[1] != 0x00) {
-		fprintf(stderr, "Error: wrong DA upload status\n");
-		ret = -1;
-		goto out;
-	}
-	dbg_printf(1, "Received DA upload status: %02x%02x\n", read_buf[0], read_buf[1]);
-	dbg_printf(0, "The DA has been successfully uploaded\n\n");
 
 	/* Jump to the DA */
-	dbg_printf(0, "Jumping to the DA...\n");
-	send_data(fd_tty, mtk_cmd_jump_da, 1);
-	buf_size = receive_data(fd_tty, read_buf, 1, 1, 0);
-	if (buf_size < 1 || read_buf[0] != mtk_cmd_jump_da[0]) {
-		fprintf(stderr, "Error: wrong reply to mtk_cmd_jump_da\n");
+	if (da_jump_stage1(fd_tty, &da1, 0) < 0) {
+		fprintf(stderr, "Error: failed to jump to the DA (stage 1)\n");
 		ret = -1;
 		goto out;
 	}
-
-	/* Set the address of the DA for the jump */
-	send_data(fd_tty, da1.start_addr, 4);
-	buf_size = receive_data(fd_tty, read_buf, 4, 4, 0);
-	if (buf_size < 4 || read_buf[0] != da1.start_addr[0] || read_buf[1] != da1.start_addr[1] || read_buf[2] != da1.start_addr[2] || read_buf[3] != da1.start_addr[3]) {
-		fprintf(stderr, "Error: wrong reply to da1.start_addr\n");
-		ret = -1;
-		goto out;
-	}
-
-	/* Get the status before the jump */
-	buf_size = receive_data(fd_tty, read_buf, 2, 2, 0);
-	if (buf_size < 2 || read_buf[0] != 0x00 || read_buf[1] != 0x00) {
-		fprintf(stderr, "Error: wrong mtk_cmd_jump_da status\n");
-		ret = -1;
-		goto out;
-	}
-
-	/* Get the DA sync byte */
-	buf_size = receive_data(fd_tty, read_buf, 1, 1, 0);
-	if (buf_size < 1 || read_buf[0] != DA_SYNC) {
-		fprintf(stderr, "Error: wrong DA sync byte\n");
-		ret = -1;
-		goto out;
-	}
-	dbg_printf(0, "DA properly started\n\n");
 
 	/* Syncing with the DA */
-	dbg_printf(0, "Syncing with the DA...\n");
-	da_send_data(fd_tty, mtk_da_cmd_sync, sizeof(mtk_da_cmd_sync));
-
-	/* Setting-up environment */
-	da_send_data(fd_tty, mtk_da_cmd_set_env, sizeof(mtk_da_cmd_set_env));
-	if (da_send_data_check_status(fd_tty, mtk_da_env_params, sizeof(mtk_da_env_params), 0) < 0) {
-		fprintf(stderr, "Error: wrong status for mtk_da_cmd_set_env (DA)\n");
+	if (da_sync_stage1(fd_tty, 0) < 0) {
+		fprintf(stderr, "Error: failed to sync with the DA (stage 1)\n");
 		ret = -1;
 		goto out;
 	}
-
-	/* HW inititialization */
-	da_send_data(fd_tty, mtk_da_cmd_hw_init, sizeof(mtk_da_cmd_hw_init));
-	if (da_send_data_check_status(fd_tty, mtk_da_hw_init_params, sizeof(mtk_da_hw_init_params), 0) < 0) {
-		fprintf(stderr, "Error: wrong status for mtk_da_cmd_hw_init (DA)\n");
-		ret = -1;
-		goto out;
-	}
-
-	/* Check syncing has been successful */
-	buf_size = da_receive_data(fd_tty, &read_buf_addr, sizeof(mtk_da_cmd_sync), 0);
-	if (buf_size < 4 || read_buf[0] != mtk_da_cmd_sync[0] || read_buf[1] != mtk_da_cmd_sync[1] || read_buf[2] != mtk_da_cmd_sync[2] || read_buf[3] != mtk_da_cmd_sync[3]) {
-		fprintf(stderr, "Error: wrong sync status received (DA)\n");
-		ret = -1;
-		goto out;
-	}
-	dbg_printf(0, "Synced with the DA\n\n");
 
 	/* Get expire date (no answer) */
 	//da_dev_ctrl_get(fd_tty, mtk_da_dev_ctrl_get_expire_date, read_buf, READ_BUF_SIZE, 0);
@@ -1117,67 +1232,11 @@ int main(int argc, char **argv)
 	}
 
 	/* Uploading stage 2 */
-	dbg_printf(0, "Uploading DA stage 2...\n");
-	da2_data = (unsigned char *) malloc(da2.size_int);
-	if (!da2_data) {
-		fprintf(stderr, "Error: cannot allocate memory for DA2 data\n");
+	if (da_upload_and_sync_stage2(fd_tty, f_da, &da2, 0) < 0) {
+		fprintf(stderr, "Error: failed to upload and sync with the DA (stage 2)\n");
 		ret = -1;
 		goto shutdown;
 	}
-
-	fseek(f_da, da2.data_offset, SEEK_SET);
-	if (fread(da2_data, 1, da2.size_int, f_da) != da2.size_int) {
-		fprintf(stderr, "Error: failed to read DA2 data\n");
-		ret = -1;
-		goto shutdown;
-	}
-
-	if (da_send_data_check_status(fd_tty, mtk_da_cmd_boot_to, sizeof(mtk_da_cmd_boot_to), 0) < 0) {
-		fprintf(stderr, "Error: wrong status for mtk_da_cmd_boot_to (DA)\n");
-		ret = -1;
-		goto shutdown;
-	}
-
-	boot_to_params[0] = da2.start_addr[3];
-	boot_to_params[1] = da2.start_addr[2];
-	boot_to_params[2] = da2.start_addr[1];
-	boot_to_params[3] = da2.start_addr[0];
-	boot_to_params[4] = 0x00;
-	boot_to_params[5] = 0x00;
-	boot_to_params[6] = 0x00;
-	boot_to_params[7] = 0x00;
-
-	boot_to_params[8] = da2.size[3];
-	boot_to_params[9] = da2.size[2];
-	boot_to_params[10] = da2.size[1];
-	boot_to_params[11] = da2.size[0];
-	boot_to_params[12] = 0x00;
-	boot_to_params[13] = 0x00;
-	boot_to_params[14] = 0x00;
-	boot_to_params[15] = 0x00;
-
-	da_send_data(fd_tty, boot_to_params, sizeof(boot_to_params));
-
-	/* Upload the actual data without the signature */
-	if (da_send_data_check_status(fd_tty, da2_data, da2.size_int - da2.sig_len_int, 0) < 0) {
-		fprintf(stderr, "Error: wrong status for mtk_da_cmd_boot_to parameters (DA)\n");
-		ret = -1;
-		goto shutdown;
-	}
-
-	free(da2_data);
-	da2_data = NULL;
-
-	dbg_printf(0, "DA stage 2 properly uploaded, jumping to it...\n");
-
-	/* Check if the jump has been successful */
-	buf_size = da_receive_data(fd_tty, &read_buf_addr, sizeof(mtk_da_cmd_sync), 0);
-	if (buf_size < 4 || read_buf[0] != mtk_da_cmd_sync[0] || read_buf[1] != mtk_da_cmd_sync[1] || read_buf[2] != mtk_da_cmd_sync[2] || read_buf[3] != mtk_da_cmd_sync[3]) {
-		fprintf(stderr, "Error: wrong sync status received (DA)\n");
-		ret = -1;
-		goto shutdown;
-	}
-	dbg_printf(0, "DA stage 2 properly running and synced\n\n");
 
 	if (da_dev_ctrl_get(fd_tty, mtk_da_dev_ctrl_get_ram_info, read_buf, 48, 0) != 48) {
 		fprintf(stderr, "Error: failed to get RAM info (DA)\n");
@@ -1256,10 +1315,6 @@ shutdown:
 	dbg_printf(0, "The device can be unplugged\n\n");
 
 out:
-	if (da2_data != NULL) {
-		free(da2_data);
-	}
-
 	if (file_data != NULL) {
 		free(file_data);
 	}
