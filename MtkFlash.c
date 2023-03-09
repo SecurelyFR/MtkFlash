@@ -83,7 +83,7 @@ typedef struct  {
 static unsigned int log_level = 0;
 
 static unsigned char mtk_cmd_start[] = {0xa0, 0x0a, 0x50, 0x05}; // START magic
-static unsigned char mtk_cmd_start_reply[] = {0x5f, 0xf5, 0xaf, 0xfa}; // Expexted reply to START magic
+static unsigned char mtk_cmd_start_reply[] = {0x5f, 0xf5, 0xaf, 0xfa}; // Expected reply to START magic
 
 static unsigned char mtk_cmd_get_version[] = {0xff};
 static unsigned char mtk_cmd_bl_ver[] = {0xfe};
