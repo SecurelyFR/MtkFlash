@@ -46,7 +46,6 @@
 
 #define DEFAULT_TTY_PATH		"/dev/ttyACM0"
 #define DEFAULT_DA_PATH			"MTK_AllInOne_DA.bin"
-#define DEFAULT_FILE_PATH		"tee.img"
 
 #define TTY_SPEED			B921600
 
@@ -69,8 +68,20 @@
 #define DA_STATUS_OK			0x00
 #define DA_STATUS_UNSUPPORTED_CTRL_CODE	0xC0010004
 
+typedef enum {
+    PART_TYPE_EMMC_BOOT1 = 1,
+    PART_TYPE_EMMC_BOOT2 = 2,
+    PART_TYPE_EMMC_RPMB = 3,
+    PART_TYPE_EMMC_GP1 = 4,
+    PART_TYPE_EMMC_GP2 = 5,
+    PART_TYPE_EMMC_GP3 = 6,
+    PART_TYPE_EMMC_GP4 = 7,
+    PART_TYPE_EMMC_USER = 8,
+    PART_TYPE_EMMC_BOOT1_BOOT2 = 10,
+} partition_type_t;
+
 // TODO: Fix this (only ints)
-typedef struct  {
+typedef struct {
 	unsigned char start_addr[4];
 	unsigned char size[4];
 	unsigned int size_int;
@@ -78,6 +89,13 @@ typedef struct  {
 	unsigned int sig_len_int;
 	unsigned int data_offset;
 } da_info_t;
+
+typedef struct flash_op {
+	struct flash_op *next;
+	char *file_name;
+	size_t address;
+	partition_type_t type;
+} flash_op_t;
 
 
 static unsigned int log_level = 0;
@@ -175,6 +193,32 @@ static void dbg_printf(unsigned int level, char *buff, ...)
 	vfprintf(stdout, buff, arglist);
 
 	va_end(arglist);
+}
+
+static void add_empty_flash_op(flash_op_t **ops)
+{
+	flash_op_t *op = (flash_op_t *) malloc(sizeof (flash_op_t));
+	if (!op) {
+		fprintf(stderr, "Error: cannot allocate memory for flash op\n");
+		return;
+	}
+
+	op->next = *ops;
+	*ops = op;
+}
+
+static void free_op_list(flash_op_t **ops)
+{
+	flash_op_t *op = *ops, *tmp;
+
+	while (op != NULL) {
+		tmp = op->next;
+		if (op->file_name != NULL) {
+			free(op->file_name);
+		}
+		free(op);
+		op = tmp;
+	}
 }
 
 static int set_interface_attribs(int fd, int speed, int parity)
@@ -752,7 +796,7 @@ static size_t da_dev_ctrl_get(int fd, unsigned char *cmd, unsigned char *buf, si
 	return da_receive_data_check_status(fd, buf, buf_size, timeout_sec);
 }
 
-static int da_read_flash(int fd, size_t address, size_t length, unsigned char *buf, size_t buf_size, unsigned int timeout_sec)
+static int da_read_flash(int fd, size_t address, size_t length, unsigned char *buf, size_t buf_size, partition_type_t type, unsigned int timeout_sec)
 {
 	unsigned char params[56] = {0};
 	unsigned char ack[4] = {0};
@@ -767,8 +811,8 @@ static int da_read_flash(int fd, size_t address, size_t length, unsigned char *b
 	params[2] = 0x00;
 	params[3] = 0x00;
 
-	/* Parttype = EMMC_USER */
-	params[4] = 0x08;
+	/* Parttype */
+	params[4] = (unsigned int) type & 0xFF;
 	params[5] = 0x00;
 	params[6] = 0x00;
 	params[7] = 0x00;
@@ -798,6 +842,7 @@ static int da_read_flash(int fd, size_t address, size_t length, unsigned char *b
 		return -1;
 	}
 
+	// Nand extension params missing ?
 	if (da_send_data_check_status(fd, params, sizeof(params), timeout_sec, 0) < 0) {
 		fprintf(stderr, "Error: wrong status for mtk_da_cmd_read_data params (DA)\n");
 		return -1;
@@ -837,7 +882,7 @@ static int da_read_flash(int fd, size_t address, size_t length, unsigned char *b
 	return 0;
 }
 
-static int da_write_flash(int fd, size_t address, unsigned char *buf, size_t length, size_t chunk_size, unsigned int timeout_sec)
+static int da_write_flash(int fd, size_t address, unsigned char *buf, size_t length, size_t chunk_size, partition_type_t type, unsigned int timeout_sec)
 {
 	unsigned char params[56] = {0};
 	unsigned char ack[4] = {0};
@@ -854,8 +899,8 @@ static int da_write_flash(int fd, size_t address, unsigned char *buf, size_t len
 	params[2] = 0x00;
 	params[3] = 0x00;
 
-	/* Parttype = EMMC_USER */
-	params[4] = 0x08;
+	/* Parttype */
+	params[4] = (unsigned int) type & 0xFF;
 	params[5] = 0x00;
 	params[6] = 0x00;
 	params[7] = 0x00;
@@ -885,6 +930,7 @@ static int da_write_flash(int fd, size_t address, unsigned char *buf, size_t len
 		return -1;
 	}
 
+	// Nand extension params missing ?
 	if (da_send_data_check_status(fd, params, sizeof(params), timeout_sec, 0) < 0) {
 		fprintf(stderr, "Error: wrong status for mtk_da_cmd_write_data params (DA)\n");
 		return -1;
@@ -1026,18 +1072,22 @@ static void usage(FILE * fp, int argc, char **argv)
 		"Options:\n"
 		"\t-t | --tty <path>             The TTY to open (default is %s)\n"
 		"\t-d | --da <path>              The DA to upload (default is %s)\n"
-		"\t-f | --file <path>            The file to write (default is %s)\n"
+		"\t-f | --file <path>            The file to write (more than one can be added)\n"
+		"\t-a | --addr <address>         The address where the file (given with -f) will be written (more than one can be added)\n"
+		"\t-p | --part <partition_type>  The type of the partition where the file (given with -f) will be written (more than one can be added)\n"
 		"\t-v | --verbose                Show more information like hex dump of the data (-vv and -vvv for even more details)\n"
 		"\t-h | --help                   Print this message\n",
-		argv[0], DEFAULT_TTY_PATH, DEFAULT_DA_PATH, DEFAULT_FILE_PATH);
+		argv[0], DEFAULT_TTY_PATH, DEFAULT_DA_PATH);
 }
 
-static const char short_options[] = "t:d:f:vh";
+static const char short_options[] = "t:d:f:a:p:vh";
 
 static const struct option long_options[] = {
 	{"tty", required_argument, NULL, 't'},
 	{"da", required_argument, NULL, 'd'},
 	{"file", required_argument, NULL, 'f'},
+	{"addr", required_argument, NULL, 'a'},
+	{"part", required_argument, NULL, 'p'},
 	{"verbose", no_argument, NULL, 'v'},
 	{"help", no_argument, NULL, 'h'},
 	{0, 0, 0, 0}
@@ -1047,7 +1097,6 @@ int main(int argc, char **argv)
 {
 	char da_path[256] = DEFAULT_DA_PATH;
 	char tty_path[256] = DEFAULT_TTY_PATH;
-	char file_path[256] = DEFAULT_FILE_PATH;
 	int fd_tty = -1;
 	FILE *f_da = NULL;
 	FILE *f_file = NULL;
@@ -1059,6 +1108,8 @@ int main(int argc, char **argv)
 	unsigned char *file_data = NULL;
 	size_t file_size = 0;
 	size_t padded_file_size = 0;
+	flash_op_t *ops = NULL, *op;
+
 
 	for (;;) {
 		int index;
@@ -1082,7 +1133,16 @@ int main(int argc, char **argv)
 				break;
 
 			case 'f':
-				strncpy(file_path, optarg, 256);
+				add_empty_flash_op(&ops);
+				ops->file_name = strdup(optarg);
+				break;
+
+			case 'a':
+				ops->address = strtoul(optarg, NULL, 0);
+				break;
+
+			case 'p':
+				ops->type = (partition_type_t) strtoul(optarg, NULL, 0);
 				break;
 
 			case 'v':
@@ -1099,38 +1159,18 @@ int main(int argc, char **argv)
 		}
 	}
 
-	f_file = fopen(file_path, "r");
-	if (f_file == NULL) {
-		fprintf(stderr, "Failed to open %s: %s\n", file_path, strerror (errno));
-		ret = -1;
+	if (ops == NULL) {
+		dbg_printf(0, "No flash operation to perform\n");
 		goto out;
 	}
 
-	fseek(f_file, 0, SEEK_END);
-	file_size = ftell(f_file);
-	padded_file_size = (file_size + (0x200 - 1)) & ~(0x200 - 1);
-	fseek(f_file, 0, SEEK_SET);
-
-	dbg_printf(1, "Loading file %s with a size of %u bytes padded to %u bytes\n\n", file_path, file_size, padded_file_size);
-
-	/* Pad with 0x00 so that the size is aligned on 512 bytes */
-	file_data = (unsigned char *) malloc(padded_file_size);
-	if (!file_data) {
-		fprintf(stderr, "Error: cannot allocate memory for file data\n");
-		ret = -1;
-		goto out;
+	dbg_printf(1, "Flash operations to perform:\n");
+	op = ops;
+	while (op != NULL) {
+		dbg_printf(1, "   Write %s at 0x%X with partition type %u...\n", op->file_name, op->address, (unsigned int) op->type);
+		op = op->next;
 	}
-
-	memset(file_data, 0, padded_file_size);
-
-	if (fread(file_data, 1, file_size, f_file) != file_size) {
-		fprintf(stderr, "Failed to read file data: %s\n", strerror (errno));
-		ret = -1;
-		goto out;
-	}
-
-	fclose(f_file);
-	f_file = NULL;
+	dbg_printf(1, "\n");
 
 	/* Open the DA and get the required information */
 	dbg_printf(0, "Using DA file %s\n", da_path);
@@ -1341,22 +1381,57 @@ int main(int argc, char **argv)
 
 	dbg_printf(1, "DA packet lengths are %u bytes for WRITE and %u bytes for READ\n\n", da_packet_length_write, da_packet_length_read);
 
+	op = ops;
+	while (op != NULL) {
+		f_file = fopen(op->file_name, "r");
+		if (f_file == NULL) {
+			fprintf(stderr, "Failed to open %s: %s\n", op->file_name, strerror (errno));
+			ret = -1;
+			goto shutdown;
+		}
 
-	dbg_printf(0, "Writing %s at 0x%X...\n", file_path, 0x13e20000);
-	if (da_write_flash(fd_tty, 0x13e20000, file_data, padded_file_size, da_packet_length_write, 0) < 0) {
-		fprintf(stderr, "Error: failed to write file_data (DA)\n");
-		ret = -1;
-		goto shutdown;
-	}
-	dbg_printf(0, "Successfully written\n\n");
+		fseek(f_file, 0, SEEK_END);
+		file_size = ftell(f_file);
+		padded_file_size = (file_size + (0x200 - 1)) & ~(0x200 - 1);
+		fseek(f_file, 0, SEEK_SET);
 
-	dbg_printf(0, "Writing %s at 0x%X...\n", file_path, 0x14320000);
-	if (da_write_flash(fd_tty, 0x14320000, file_data, padded_file_size, da_packet_length_write, 0) < 0) {
-		fprintf(stderr, "Error: failed to write file_data (DA)\n");
-		ret = -1;
-		goto shutdown;
+		dbg_printf(1, "Loading file %s with a size of %u bytes padded to %u bytes\n", op->file_name, file_size, padded_file_size);
+
+		/* Pad with 0x00 so that the size is aligned on 512 bytes */
+		file_data = (unsigned char *) malloc(padded_file_size);
+		if (!file_data) {
+			fprintf(stderr, "Error: cannot allocate memory for file data\n");
+			fclose(f_file);
+			ret = -1;
+			goto shutdown;
+		}
+
+		memset(file_data, 0, padded_file_size);
+
+		if (fread(file_data, 1, file_size, f_file) != file_size) {
+			fprintf(stderr, "Failed to read file data: %s\n", strerror (errno));
+			fclose(f_file);
+			free(file_data);
+			ret = -1;
+			goto shutdown;
+		}
+
+		fclose(f_file);
+
+		dbg_printf(0, "Writing %s (%u bytes) at 0x%X...\n", op->file_name, file_size, op->address);
+
+		if (da_write_flash(fd_tty, op->address, file_data, padded_file_size, da_packet_length_write, op->type, 0) < 0) {
+			fprintf(stderr, "Error: failed to flash %s (DA)\n", op->file_name);
+			free(file_data);
+			ret = -1;
+			goto shutdown;
+		}
+
+		free(file_data);
+		dbg_printf(0, "Successfully written\n\n");
+
+		op = op->next;
 	}
-	dbg_printf(0, "Successfully written\n\n");
 
 	//da_read_flash(fd_tty, 0x13e20000, 0x500000, read_buf, READ_BUF_SIZE, 0);
 
@@ -1370,9 +1445,7 @@ shutdown:
 	dbg_printf(0, "The device can be unplugged\n\n");
 
 out:
-	if (file_data != NULL) {
-		free(file_data);
-	}
+	free_op_list(&ops);
 
 	if (fd_tty > 0) {
 		close(fd_tty);
@@ -1380,10 +1453,6 @@ out:
 
 	if (f_da != NULL) {
 		fclose(f_da);
-	}
-
-	if (f_file != NULL) {
-		fclose(f_file);
 	}
 
 	return ret;
