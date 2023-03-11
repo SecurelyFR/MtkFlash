@@ -1075,12 +1075,13 @@ static void usage(FILE * fp, int argc, char **argv)
 		"\t-f | --file <path>            The file to write (more than one can be added)\n"
 		"\t-a | --addr <address>         The address where the file (given with -f) will be written (more than one can be added)\n"
 		"\t-p | --part <partition_type>  The type of the partition where the file (given with -f) will be written (more than one can be added)\n"
+		"\t-S | --shutdown               Try to send a shutdown command to the DA\n"
 		"\t-v | --verbose                Show more information like hex dump of the data (-vv and -vvv for even more details)\n"
 		"\t-h | --help                   Print this message\n",
 		argv[0], DEFAULT_TTY_PATH, DEFAULT_DA_PATH);
 }
 
-static const char short_options[] = "t:d:f:a:p:vh";
+static const char short_options[] = "t:d:f:a:p:Svh";
 
 static const struct option long_options[] = {
 	{"tty", required_argument, NULL, 't'},
@@ -1088,6 +1089,7 @@ static const struct option long_options[] = {
 	{"file", required_argument, NULL, 'f'},
 	{"addr", required_argument, NULL, 'a'},
 	{"part", required_argument, NULL, 'p'},
+	{"shutdown", no_argument, NULL, 'S'},
 	{"verbose", no_argument, NULL, 'v'},
 	{"help", no_argument, NULL, 'h'},
 	{0, 0, 0, 0}
@@ -1109,7 +1111,7 @@ int main(int argc, char **argv)
 	size_t file_size = 0;
 	size_t padded_file_size = 0;
 	flash_op_t *ops = NULL, *op;
-
+	int shutdown = 0;
 
 	for (;;) {
 		int index;
@@ -1149,6 +1151,10 @@ int main(int argc, char **argv)
 				log_level++;
 				break;
 
+			case 'S':
+				shutdown = 1;
+				break;
+
 			case 'h':
 				usage(stdout, argc, argv);
 				exit(EXIT_SUCCESS);
@@ -1159,7 +1165,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (ops == NULL) {
+	if (shutdown == 0 && ops == NULL) {
 		dbg_printf(0, "No flash operation to perform\n");
 		goto out;
 	}
@@ -1206,6 +1212,12 @@ int main(int argc, char **argv)
 
 	/* Be sure we start from a sane point */
 	tcflush(fd_tty, TCIOFLUSH);
+
+	if (shutdown != 0) {
+		/* Assume the device is in DA stage 2 mode, and send a shutdown */
+		ret = 0;
+		goto shutdown;
+	}
 
 	/* Wait for the "READY" string */
 	dbg_printf(0, "Waiting for the device to be ready...\n");
