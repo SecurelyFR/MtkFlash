@@ -971,15 +971,40 @@ static int da_read_flash(int fd, size_t address, size_t length, unsigned char *b
 	return 0;
 }
 
-static int da_write_flash(int fd, size_t address, unsigned char *buf, size_t length, size_t chunk_size, partition_type_t type, unsigned int timeout_sec)
+static int da_write_flash(int fd, size_t address, char *file_name, size_t chunk_size, partition_type_t type, unsigned int timeout_sec)
 {
+	FILE *f;
 	unsigned char params[56] = {0};
 	unsigned char ack[4] = {0};
+	unsigned char *buf;
 	unsigned char checksum[4] = {0};
 	unsigned int checksum_int = 0;
+	size_t file_size = 0;
+	size_t bytes_to_send = 0;
 	size_t packet_len = 0;
-	size_t total_length = length;
+	size_t total_length;
 	size_t i;
+
+	f = fopen(file_name, "r");
+	if (f == NULL) {
+		fprintf(stderr, "Failed to open %s: %s\n", file_name, strerror (errno));
+		return -1;
+	}
+
+	fseek(f, 0, SEEK_END);
+	file_size = ftell(f);
+	bytes_to_send = (file_size + (0x200 - 1)) & ~(0x200 - 1);
+	total_length = bytes_to_send;
+	fseek(f, 0, SEEK_SET);
+
+	dbg_printf(1, "File %s has a size of %u bytes padded to %u bytes\n", file_name, file_size, bytes_to_send);
+
+	buf = (unsigned char *) malloc(chunk_size);
+	if (!buf) {
+		fprintf(stderr, "Error: cannot allocate memory for write buffer\n");
+		fclose(f);
+		return -1;
+	}
 
 	/* TODO: support more storage */
 	/* Storage = EMMC */
@@ -1005,28 +1030,42 @@ static int da_write_flash(int fd, size_t address, unsigned char *buf, size_t len
 	params[15] = (address >> 56) & 0xFF;
 
 	/* Length */
-	params[16] = length & 0xFF;
-	params[17] = (length >> 8) & 0xFF;
-	params[18] = (length >> 16) & 0xFF;
-	params[19] = (length >> 24) & 0xFF;
-	params[20] = (length >> 32) & 0xFF;
-	params[21] = (length >> 40) & 0xFF;
-	params[22] = (length >> 48) & 0xFF;
-	params[23] = (length >> 56) & 0xFF;
+	params[16] = bytes_to_send & 0xFF;
+	params[17] = (bytes_to_send >> 8) & 0xFF;
+	params[18] = (bytes_to_send >> 16) & 0xFF;
+	params[19] = (bytes_to_send >> 24) & 0xFF;
+	params[20] = (bytes_to_send >> 32) & 0xFF;
+	params[21] = (bytes_to_send >> 40) & 0xFF;
+	params[22] = (bytes_to_send >> 48) & 0xFF;
+	params[23] = (bytes_to_send >> 56) & 0xFF;
 
 	if (da_send_data_check_status(fd, mtk_da_cmd_write_data, sizeof(mtk_da_cmd_write_data), timeout_sec, 0) < 0) {
 		fprintf(stderr, "Error: wrong status for mtk_da_cmd_write_data (DA)\n");
+		free(buf);
+		fclose(f);
 		return -1;
 	}
 
 	// Nand extension params missing ?
 	if (da_send_data_check_status(fd, params, sizeof(params), timeout_sec, 0) < 0) {
 		fprintf(stderr, "Error: wrong status for mtk_da_cmd_write_data params (DA)\n");
+		free(buf);
+		fclose(f);
 		return -1;
 	}
 
-	while (length > 0) {
-		packet_len = (length > chunk_size) ? chunk_size : length;
+	while (bytes_to_send > 0) {
+		packet_len = (bytes_to_send > chunk_size) ? chunk_size : bytes_to_send;
+
+		/* Pad with 0x00 so that the size is aligned on 512 bytes */
+		memset(buf, 0, packet_len);
+
+		if ((fread(buf, 1, packet_len, f) < packet_len) && !feof(f)) {
+			fprintf(stderr, "Error: Failed to read file data: %s\n", strerror (errno));
+			free(buf);
+			fclose(f);
+			return -1;
+		}
 
 		/* Compute checksum for the chunk */
 		for (i = 0; i < packet_len; i++) {
@@ -1044,16 +1083,19 @@ static int da_write_flash(int fd, size_t address, unsigned char *buf, size_t len
 		da_send_data(fd, checksum, sizeof(checksum), 0);
 
 		if (da_send_data_check_status(fd, buf, packet_len, timeout_sec, 0) < 0) {
-			fprintf(stderr, "Error: wrong status for mtk_da_cmd_write_data chunk with %lu bytes remaining (DA)\n", length);
+			fprintf(stderr, "Error: wrong status for mtk_da_cmd_write_data chunk with %lu bytes remaining (DA)\n", bytes_to_send);
+			free(buf);
+			fclose(f);
 			return -1;
 		}
 
-		length -= packet_len;
-		buf += packet_len;
+		bytes_to_send -= packet_len;
 
-		show_progress(total_length - length, total_length, 80);
+		show_progress(total_length - bytes_to_send, total_length, 80);
 	}
 
+	free(buf);
+	fclose(f);
 	clear_progress();
 
 	return 0;
@@ -1192,15 +1234,11 @@ int main(int argc, char **argv)
 	char tty_path[256] = DEFAULT_TTY_PATH;
 	int fd_tty = -1;
 	FILE *f_da = NULL;
-	FILE *f_file = NULL;
 	int ret = 0;
 	struct stat st;
 	size_t buf_size;
 	da_info_t da1, da2;
 	unsigned int da_packet_length_write = 0, da_packet_length_read = 0;
-	unsigned char *file_data = NULL;
-	size_t file_size = 0;
-	size_t padded_file_size = 0;
 	flash_op_t *ops = NULL, *op;
 	int shutdown = 0;
 
@@ -1491,52 +1529,14 @@ int main(int argc, char **argv)
 
 	op = ops;
 	while (op != NULL) {
-		f_file = fopen(op->file_name, "r");
-		if (f_file == NULL) {
-			fprintf(stderr, "Failed to open %s: %s\n", op->file_name, strerror (errno));
-			ret = -1;
-			goto shutdown;
-		}
+		dbg_printf(0, "Writing %s at 0x%X...\n", op->file_name, op->address);
 
-		fseek(f_file, 0, SEEK_END);
-		file_size = ftell(f_file);
-		padded_file_size = (file_size + (0x200 - 1)) & ~(0x200 - 1);
-		fseek(f_file, 0, SEEK_SET);
-
-		dbg_printf(1, "Loading file %s with a size of %u bytes padded to %u bytes\n", op->file_name, file_size, padded_file_size);
-
-		/* TODO: Stream the file instead */
-		/* Pad with 0x00 so that the size is aligned on 512 bytes */
-		file_data = (unsigned char *) malloc(padded_file_size);
-		if (!file_data) {
-			fprintf(stderr, "Error: cannot allocate memory for file data\n");
-			fclose(f_file);
-			ret = -1;
-			goto shutdown;
-		}
-
-		memset(file_data, 0, padded_file_size);
-
-		if (fread(file_data, 1, file_size, f_file) != file_size) {
-			fprintf(stderr, "Failed to read file data: %s\n", strerror (errno));
-			fclose(f_file);
-			free(file_data);
-			ret = -1;
-			goto shutdown;
-		}
-
-		fclose(f_file);
-
-		dbg_printf(0, "Writing %s (%u bytes) at 0x%X...\n", op->file_name, file_size, op->address);
-
-		if (da_write_flash(fd_tty, op->address, file_data, padded_file_size, da_packet_length_write, op->type, 0) < 0) {
+		if (da_write_flash(fd_tty, op->address, op->file_name, da_packet_length_write, op->type, 0) < 0) {
 			fprintf(stderr, "Error: failed to flash %s (DA)\n", op->file_name);
-			free(file_data);
 			ret = -1;
 			goto shutdown;
 		}
 
-		free(file_data);
 		dbg_printf(0, "Successfully written\n\n");
 
 		op = op->next;
