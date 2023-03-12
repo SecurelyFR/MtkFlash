@@ -6,6 +6,7 @@
 #include <termios.h>
 #include <unistd.h>
 #include <string.h>
+#include <libgen.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -205,6 +206,94 @@ static void add_empty_flash_op(flash_op_t **ops)
 
 	op->next = *ops;
 	*ops = op;
+}
+
+static void add_flash_ops_from_scatter_file(flash_op_t **ops, char *scatter_file)
+{
+	FILE *f;
+	char line[512];
+	flash_op_t *op = NULL;
+	char *path;
+
+	f = fopen(scatter_file, "r");
+	if (f == NULL) {
+		fprintf(stderr, "Failed to open %s: %s\n", scatter_file, strerror (errno));
+		return;
+	}
+
+	path = dirname(scatter_file);
+
+	while (fgets(line, 512, f) != NULL) {
+		/* Assume fields are always in that specific order */
+		if (!strncmp(line, "  file_name:", 12)) {
+			if (op) {
+				fprintf(stderr, "Error: unexpected file_name field\n");
+				continue;
+			}
+
+			if (!strncmp(line + 13, "NONE", 4)) {
+				continue;
+			}
+
+			op = (flash_op_t *) malloc(sizeof (flash_op_t));
+			if (!op) {
+				fprintf(stderr, "Error: cannot allocate memory for flash op\n");
+				break;
+			}
+
+// 			op->file_name = strdup(line + 13);
+			op->file_name = (char *) malloc(strlen(path) + strlen(line + 13) + 1);
+			if (!op->file_name) {
+				fprintf(stderr, "Error: cannot allocate memory for flash op file name\n");
+				break;
+			}
+
+			strcpy(op->file_name, path);
+			strcat(op->file_name, "/");
+			strcat(op->file_name, line + 13);
+			op->file_name[strlen(op->file_name) - 1] = '\0';
+		} else if (!strncmp(line, "  physical_start_addr:", 22)) {
+			if (!op) {
+				continue;
+			}
+
+			op->address = strtoul(line + 23, NULL, 0);
+		} else if (!strncmp(line, "  region:", 9)) {
+			if (!op) {
+				continue;
+			}
+
+			if (!strncmp(line + 10, "EMMC_BOOT1_BOOT2", 16)) {
+				op->type = PART_TYPE_EMMC_BOOT1_BOOT2;
+			} else if (!strncmp(line + 10, "EMMC_BOOT1", 10)) {
+				op->type = PART_TYPE_EMMC_BOOT1;
+			} else if (!strncmp(line + 10, "EMMC_BOOT2", 10)) {
+				op->type = PART_TYPE_EMMC_BOOT2;
+			} else if (!strncmp(line + 10, "EMMC_RPMB", 9)) {
+				op->type = PART_TYPE_EMMC_RPMB;
+			} else if (!strncmp(line + 10, "EMMC_GP1", 8)) {
+				op->type = PART_TYPE_EMMC_GP1;
+			} else if (!strncmp(line + 10, "EMMC_GP2", 8)) {
+				op->type = PART_TYPE_EMMC_GP2;
+			} else if (!strncmp(line + 10, "EMMC_GP3", 8)) {
+				op->type = PART_TYPE_EMMC_GP3;
+			} else if (!strncmp(line + 10, "EMMC_GP4", 8)) {
+				op->type = PART_TYPE_EMMC_GP4;
+			} else if (!strncmp(line + 10, "EMMC_USER", 9)) {
+				op->type = PART_TYPE_EMMC_USER;
+			} else {
+				op->type = PART_TYPE_EMMC_USER;
+			}
+
+			op->next = *ops;
+			*ops = op;
+			op = NULL;
+		} else {
+			continue;
+		}
+	}
+
+	fclose(f);
 }
 
 static void free_op_list(flash_op_t **ops)
@@ -1072,6 +1161,7 @@ static void usage(FILE * fp, int argc, char **argv)
 		"Options:\n"
 		"\t-t | --tty <path>             The TTY to open (default is %s)\n"
 		"\t-d | --da <path>              The DA to upload (default is %s)\n"
+		"\t-s | --scatter <path>         The scatter file to use\n"
 		"\t-f | --file <path>            The file to write (more than one can be added)\n"
 		"\t-a | --addr <address>         The address where the file (given with -f) will be written (more than one can be added)\n"
 		"\t-p | --part <partition_type>  The type of the partition where the file (given with -f) will be written (more than one can be added)\n"
@@ -1081,11 +1171,12 @@ static void usage(FILE * fp, int argc, char **argv)
 		argv[0], DEFAULT_TTY_PATH, DEFAULT_DA_PATH);
 }
 
-static const char short_options[] = "t:d:f:a:p:Svh";
+static const char short_options[] = "t:d:s:f:a:p:Svh";
 
 static const struct option long_options[] = {
 	{"tty", required_argument, NULL, 't'},
 	{"da", required_argument, NULL, 'd'},
+	{"scatter", required_argument, NULL, 's'},
 	{"file", required_argument, NULL, 'f'},
 	{"addr", required_argument, NULL, 'a'},
 	{"part", required_argument, NULL, 'p'},
@@ -1132,6 +1223,11 @@ int main(int argc, char **argv)
 
 			case 'd':
 				strncpy(da_path, optarg, 256);
+				break;
+
+			case 's':
+				dbg_printf(0, "Using scatter file %s\n\n", optarg);
+				add_flash_ops_from_scatter_file(&ops, optarg);
 				break;
 
 			case 'f':
@@ -1409,6 +1505,7 @@ int main(int argc, char **argv)
 
 		dbg_printf(1, "Loading file %s with a size of %u bytes padded to %u bytes\n", op->file_name, file_size, padded_file_size);
 
+		/* TODO: Stream the file instead */
 		/* Pad with 0x00 so that the size is aligned on 512 bytes */
 		file_data = (unsigned char *) malloc(padded_file_size);
 		if (!file_data) {
