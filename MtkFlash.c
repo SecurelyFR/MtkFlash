@@ -1522,8 +1522,8 @@ int main(int argc, char **argv)
 		goto shutdown;
 	}
 
-	da_packet_length_write = read_buf[3] | (read_buf[2] << 8) | (read_buf[1] << 16) | (read_buf[0] << 24);
-	da_packet_length_read = read_buf[7] | (read_buf[6] << 8) | (read_buf[5] << 16) | (read_buf[4] << 24);
+	da_packet_length_write = read_buf[0] | (read_buf[1] << 8) | (read_buf[2] << 16) | (read_buf[3] << 24);
+	da_packet_length_read = read_buf[4] | (read_buf[5] << 8) | (read_buf[6] << 16) | (read_buf[7] << 24);
 
 	dbg_printf(1, "DA packet lengths are %u bytes for WRITE and %u bytes for READ\n\n", da_packet_length_write, da_packet_length_read);
 
