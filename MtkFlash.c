@@ -182,6 +182,8 @@ static unsigned char mtk_da_dev_ctrl_get_error_detail[] = {0x15, 0x00, 0x04, 0x0
 
 static unsigned char read_buf[READ_BUF_SIZE];
 
+static int last_progress_precent = -1;
+
 
 static int is_print_enabled(unsigned int level)
 {
@@ -405,13 +407,19 @@ static void hex_dump(unsigned char *buf, size_t size, char indicator)
 	dbg_printf(2, "\n\n");
 }
 
-static void show_progress(unsigned int current, unsigned int total, unsigned int length)
+static void show_progress(size_t current, size_t total, size_t length)
 {
 	unsigned int i;
 	unsigned int steps = length - ((total - current) * length)/total;
+	unsigned int percent = (current * 100)/total;
 
 	if (is_print_enabled(2)) {
 		/* No progress bar when hex dump is enabled */
+		return;
+	}
+
+	if (percent == last_progress_precent) {
+		/* No update needed */
 		return;
 	}
 
@@ -425,11 +433,17 @@ static void show_progress(unsigned int current, unsigned int total, unsigned int
 		dbg_printf(0, " ");
 	}
 
-	dbg_printf(0, "] %02u%%", (current * 100)/total);
+	dbg_printf(0, "] %02u%%", percent);
+
+	fflush(stdout);
+
+	last_progress_precent = percent;
 }
 
 static void clear_progress(void)
 {
+	last_progress_precent = -1;
+
 	if (is_print_enabled(2)) {
 		/* No progress bar when hex dump is enabled */
 		return;
