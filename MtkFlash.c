@@ -693,7 +693,10 @@ static int da_send_data_check_status(int fd, unsigned char *buf, size_t buf_size
 {
 	unsigned int status;
 
-	da_send_data(fd, buf, buf_size, progress);
+	if (buf != NULL && buf_size > 0) {
+		da_send_data(fd, buf, buf_size, progress);
+	}
+
 	status = da_get_status(fd, timeout_sec);
 	if (status != DA_STATUS_OK) {
 		fprintf(stderr, "Error: wrong status received 0x%x\n", status);
