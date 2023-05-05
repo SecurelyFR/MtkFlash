@@ -70,6 +70,13 @@
 #define DA_STATUS_UNSUPPORTED_CTRL_CODE	0xC0010004
 
 typedef enum {
+	OP_TYPE_DOWNLOAD,
+	OP_TYPE_WRITE,
+	OP_TYPE_READ,
+	OP_TYPE_FORMAT,
+} op_type_t;
+
+typedef enum {
     PART_TYPE_EMMC_BOOT1 = 1,
     PART_TYPE_EMMC_BOOT2 = 2,
     PART_TYPE_EMMC_RPMB = 3,
@@ -96,6 +103,8 @@ typedef struct flash_op {
 	char *file_name;
 	size_t address;
 	partition_type_t type;
+	char *partition_name;
+	op_type_t op_type;
 } flash_op_t;
 
 
@@ -135,6 +144,9 @@ static unsigned char mtk_da_cmd_set_env[] = {0x00, 0x01, 0x01, 0x00};
 static unsigned char mtk_da_env_params[] = {0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00};
 static unsigned char mtk_da_cmd_hw_init[] = {0x01, 0x01, 0x01, 0x00};
 static unsigned char mtk_da_hw_init_params[] = {0x00, 0x00, 0x00, 0x00}; // No config
+static unsigned char mtk_da_cmd_download[] = {0x01, 0x00, 0x01, 0x00};
+static unsigned char mtk_da_cmd_upload[] = {0x02, 0x00, 0x01, 0x00};
+static unsigned char mtk_da_cmd_format[] = {0x03, 0x00, 0x01, 0x00};
 static unsigned char mtk_da_cmd_write_data[] = {0x04, 0x00, 0x01, 0x00};
 static unsigned char mtk_da_cmd_read_data[] = {0x05, 0x00, 0x01, 0x00};
 static unsigned char mtk_da_cmd_shutdown[] = {0x07, 0x00, 0x01, 0x00};
@@ -180,6 +192,8 @@ static unsigned char mtk_da_dev_ctrl_get_dev_fw_info[] = {0x13, 0x00, 0x04, 0x00
 static unsigned char mtk_da_dev_ctrl_get_hrid[] = {0x14, 0x00, 0x04, 0x00};			//0x040014
 static unsigned char mtk_da_dev_ctrl_get_error_detail[] = {0x15, 0x00, 0x04, 0x00};		//0x040015
 
+static unsigned char mtk_da_dev_ctrl_start_dl_info[] = {0x01, 0x00, 0x08, 0x00};		//0x080001
+
 static unsigned char read_buf[READ_BUF_SIZE];
 
 static int last_progress_precent = -1;
@@ -213,6 +227,8 @@ static void add_empty_flash_op(flash_op_t **ops)
 		return;
 	}
 
+	op->file_name = NULL;
+	op->partition_name = NULL;
 	op->next = *ops;
 	*ops = op;
 }
@@ -223,6 +239,7 @@ static void add_flash_ops_from_scatter_file(flash_op_t **ops, char *scatter_file
 	char line[512];
 	flash_op_t *op = NULL;
 	char *path;
+	char *partition_name = NULL;
 
 	f = fopen(scatter_file, "r");
 	if (f == NULL) {
@@ -234,13 +251,25 @@ static void add_flash_ops_from_scatter_file(flash_op_t **ops, char *scatter_file
 
 	while (fgets(line, 512, f) != NULL) {
 		/* Assume fields are always in that specific order */
-		if (!strncmp(line, "  file_name:", 12)) {
+		if (!strncmp(line, "  partition_name:", 17)) {
+			if (op) {
+				fprintf(stderr, "Error: unexpected partition_name field\n");
+				continue;
+			}
+
+			partition_name = strdup(line + 18);
+			partition_name[strlen(partition_name) - 1] = '\0';
+		} else if (!strncmp(line, "  file_name:", 12)) {
 			if (op) {
 				fprintf(stderr, "Error: unexpected file_name field\n");
 				continue;
 			}
 
 			if (!strncmp(line + 13, "NONE", 4)) {
+				if (partition_name != NULL) {
+					free(partition_name);
+					partition_name = NULL;
+				}
 				continue;
 			}
 
@@ -250,7 +279,9 @@ static void add_flash_ops_from_scatter_file(flash_op_t **ops, char *scatter_file
 				break;
 			}
 
-// 			op->file_name = strdup(line + 13);
+			op->partition_name = partition_name;
+			partition_name = NULL;
+
 			op->file_name = (char *) malloc(strlen(path) + strlen(line + 13) + 1);
 			if (!op->file_name) {
 				fprintf(stderr, "Error: cannot allocate memory for flash op file name\n");
@@ -294,9 +325,36 @@ static void add_flash_ops_from_scatter_file(flash_op_t **ops, char *scatter_file
 				op->type = PART_TYPE_EMMC_USER;
 			}
 
+			/* Use OP_TYPE_DOWNLOAD for all operations comming from a scatter file */
+			op->op_type = OP_TYPE_DOWNLOAD;
+
 			op->next = *ops;
 			*ops = op;
 			op = NULL;
+
+			/* NOTE: SGPT, PGPT and preloader_backup are special hard-coded partition name */
+			if (!strcmp((*ops)->partition_name, "sgpt")) {
+				/* To uppercase */
+				(*ops)->partition_name[0] = 'S';
+				(*ops)->partition_name[1] = 'G';
+				(*ops)->partition_name[2] = 'P';
+				(*ops)->partition_name[3] = 'T';
+			} else if (!strcmp((*ops)->partition_name, "pgpt")) {
+				/* To uppercase */
+				(*ops)->partition_name[0] = 'P';
+				(*ops)->partition_name[1] = 'G';
+				(*ops)->partition_name[2] = 'P';
+				(*ops)->partition_name[3] = 'T';
+			} else if (!strcmp((*ops)->partition_name, "preloader")) {
+				/* Add a preloader_backup op as well */
+				/* TODO: check if this is needed in write mode to BOOT1_BOOT2 */
+				add_empty_flash_op(ops);
+				(*ops)->partition_name = strdup("preloader_backup");
+				(*ops)->file_name = strdup((*ops)->next->file_name);
+				(*ops)->address = (*ops)->next->address;
+				(*ops)->type = (*ops)->next->type;
+				(*ops)->op_type = OP_TYPE_DOWNLOAD;
+			}
 		} else {
 			continue;
 		}
@@ -313,6 +371,9 @@ static void free_op_list(flash_op_t **ops)
 		tmp = op->next;
 		if (op->file_name != NULL) {
 			free(op->file_name);
+		}
+		if (op->partition_name != NULL) {
+			free(op->partition_name);
 		}
 		free(op);
 		op = tmp;
@@ -1125,6 +1186,118 @@ static int da_write_flash(int fd, size_t address, char *file_name, size_t chunk_
 	return 0;
 }
 
+static int da_download_to_partition(int fd, char *partition_name, char *file_name, size_t chunk_size, unsigned int timeout_sec)
+{
+	FILE *f;
+	unsigned char params[8] = {0};
+	unsigned char ack[4] = {0};
+	unsigned char *buf;
+	unsigned char checksum[4] = {0};
+	unsigned int checksum_int = 0;
+	size_t file_size = 0;
+	size_t bytes_to_send = 0;
+	size_t packet_len = 0;
+	size_t total_length;
+	size_t i;
+
+	f = fopen(file_name, "r");
+	if (f == NULL) {
+		fprintf(stderr, "Failed to open %s: %s\n", file_name, strerror (errno));
+		return -1;
+	}
+
+	fseek(f, 0, SEEK_END);
+	file_size = ftell(f);
+	bytes_to_send = (file_size + (0x200 - 1)) & ~(0x200 - 1);
+	total_length = bytes_to_send;
+	fseek(f, 0, SEEK_SET);
+
+	dbg_printf(1, "File %s has a size of %u bytes padded to %u bytes\n", file_name, file_size, bytes_to_send);
+
+	buf = (unsigned char *) malloc(chunk_size);
+	if (!buf) {
+		fprintf(stderr, "Error: cannot allocate memory for write buffer\n");
+		fclose(f);
+		return -1;
+	}
+
+	/* Length */
+	params[0] = bytes_to_send & 0xFF;
+	params[1] = (bytes_to_send >> 8) & 0xFF;
+	params[2] = (bytes_to_send >> 16) & 0xFF;
+	params[3] = (bytes_to_send >> 24) & 0xFF;
+	params[4] = (bytes_to_send >> 32) & 0xFF;
+	params[5] = (bytes_to_send >> 40) & 0xFF;
+	params[6] = (bytes_to_send >> 48) & 0xFF;
+	params[7] = (bytes_to_send >> 56) & 0xFF;
+
+	if (da_send_data_check_status(fd, mtk_da_cmd_download, sizeof(mtk_da_cmd_download), timeout_sec, 0) < 0) {
+		fprintf(stderr, "Error: wrong status for mtk_da_cmd_download (DA)\n");
+		free(buf);
+		fclose(f);
+		return -1;
+	}
+
+	da_send_data(fd, (unsigned char *) partition_name, strlen(partition_name), 0);
+	if (da_send_data_check_status(fd, params, sizeof(params), timeout_sec, 0) < 0) {
+		fprintf(stderr, "Error: wrong status for mtk_da_cmd_download params (DA)\n");
+		free(buf);
+		fclose(f);
+		return -1;
+	}
+
+	while (bytes_to_send > 0) {
+		packet_len = (bytes_to_send > chunk_size) ? chunk_size : bytes_to_send;
+
+		/* Pad with 0x00 so that the size is aligned on 512 bytes */
+		memset(buf, 0, packet_len);
+
+		if ((fread(buf, 1, packet_len, f) < packet_len) && !feof(f)) {
+			fprintf(stderr, "Failed to read file data: %s\n", strerror (errno));
+			free(buf);
+			fclose(f);
+			return -1;
+		}
+
+		/* Compute checksum for the chunk */
+		for (i = 0; i < packet_len; i++) {
+			checksum_int += buf[i];
+		}
+		checksum_int &= 0xFFFFFFFF;
+		checksum[0] = checksum_int & 0xFF;
+		checksum[1] = (checksum_int >> 8) & 0xFF;
+		checksum[2] = (checksum_int >> 16) & 0xFF;
+		checksum[3] = (checksum_int >> 24) & 0xFF;
+		dbg_printf(3, "Packet length is %u bytes, checksum is 0x%x\n", packet_len, checksum_int);
+
+		/* Send the chunk */
+		da_send_data(fd, ack, sizeof(ack), 0);
+		da_send_data(fd, checksum, sizeof(checksum), 0);
+
+		if (da_send_data_check_status(fd, buf, packet_len, timeout_sec, 0) < 0) {
+			fprintf(stderr, "Error: wrong status for mtk_da_cmd_download chunk with %lu bytes remaining (DA)\n", bytes_to_send);
+			free(buf);
+			fclose(f);
+			return -1;
+		}
+
+		bytes_to_send -= packet_len;
+
+		show_progress(total_length - bytes_to_send, total_length, 80);
+	}
+
+	if (da_get_status(fd, timeout_sec) != DA_STATUS_OK) {
+		fprintf(stderr, "Error: wrong final status for mtk_da_cmd_download (DA)\n");
+		return -1;
+	}
+
+	free(buf);
+	fclose(f);
+	clear_progress();
+
+	return 0;
+}
+
 static int da_shutdown(int fd, unsigned int timeout_sec)
 {
 	unsigned char params[32] = {0}; // bootmode = shutdown
@@ -1230,14 +1403,17 @@ static void usage(FILE * fp, int argc, char **argv)
 		"\t-s | --scatter <path>         The scatter file to use\n"
 		"\t-f | --file <path>            The file to write (more than one can be added)\n"
 		"\t-a | --addr <address>         The address where the file (given with -f) will be written (more than one can be added)\n"
-		"\t-p | --part <partition_type>  The type of the partition where the file (given with -f) will be written (more than one can be added)\n"
+		"\t-n | --name <partition_name>  The name of the partition where the file (given with -f) will be written (more than one can be added)\n"
+		"\t-p | --type <partition_type>  The type of the partition to read or write (more than one can be added)\n"
+		"\t-D | --download               Download the file given with -f to the partition given with -n (more than one can be added)\n"
+		"\t-W | --write                  Write the file given with -f at the address given with -a using the partition type given with -p (more than one can be added)\n"
 		"\t-S | --shutdown               Try to send a shutdown command to the DA\n"
 		"\t-v | --verbose                Show more information like hex dump of the data (-vv and -vvv for even more details)\n"
 		"\t-h | --help                   Print this message\n",
 		argv[0], DEFAULT_TTY_PATH, DEFAULT_DA_PATH);
 }
 
-static const char short_options[] = "t:d:s:f:a:p:Svh";
+static const char short_options[] = "t:d:s:f:a:n:p:DWSvh";
 
 static const struct option long_options[] = {
 	{"tty", required_argument, NULL, 't'},
@@ -1245,7 +1421,10 @@ static const struct option long_options[] = {
 	{"scatter", required_argument, NULL, 's'},
 	{"file", required_argument, NULL, 'f'},
 	{"addr", required_argument, NULL, 'a'},
-	{"part", required_argument, NULL, 'p'},
+	{"name", required_argument, NULL, 'n'},
+	{"type", required_argument, NULL, 'p'},
+	{"download", no_argument, NULL, 'D'},
+	{"write", no_argument, NULL, 'W'},
 	{"shutdown", no_argument, NULL, 'S'},
 	{"verbose", no_argument, NULL, 'v'},
 	{"help", no_argument, NULL, 'h'},
@@ -1301,8 +1480,20 @@ int main(int argc, char **argv)
 				ops->address = strtoul(optarg, NULL, 0);
 				break;
 
+			case 'n':
+				ops->partition_name = strdup(optarg);
+				break;
+
 			case 'p':
 				ops->type = (partition_type_t) strtoul(optarg, NULL, 0);
+				break;
+
+			case 'D':
+				ops->op_type = OP_TYPE_DOWNLOAD;
+				break;
+
+			case 'W':
+				ops->op_type = OP_TYPE_WRITE;
 				break;
 
 			case 'v':
@@ -1331,7 +1522,21 @@ int main(int argc, char **argv)
 	dbg_printf(1, "Flash operations to perform:\n");
 	op = ops;
 	while (op != NULL) {
-		dbg_printf(1, "   Write %s at 0x%X with partition type %u...\n", op->file_name, op->address, (unsigned int) op->type);
+		switch (op->op_type) {
+			case OP_TYPE_DOWNLOAD:
+				dbg_printf(1, "   Download %s to partition %s...\n", op->file_name, op->partition_name);
+				break;
+
+			case OP_TYPE_WRITE:
+				dbg_printf(1, "   Write %s at 0x%X with partition type %u...\n", op->file_name, op->address, (unsigned int) op->type);
+				break;
+
+			case OP_TYPE_READ:
+				break;
+
+			case OP_TYPE_FORMAT:
+				break;
+		}
 		op = op->next;
 	}
 	dbg_printf(1, "\n");
@@ -1539,6 +1744,12 @@ int main(int argc, char **argv)
 		goto shutdown;
 	}
 
+	if (da_dev_ctrl_set(fd_tty, mtk_da_dev_ctrl_start_dl_info, NULL, 0, 0) != 0) {
+		fprintf(stderr, "Error: failed to send START_DL info (DA)\n");
+		ret = -1;
+		goto shutdown;
+	}
+
 	/* Get read/write packet lengths */
 	if (da_dev_ctrl_get(fd_tty, mtk_da_dev_ctrl_get_packet_length, read_buf, 8, 0) != 8) {
 		fprintf(stderr, "Error: failed to get packet length (DA)\n");
@@ -1553,15 +1764,42 @@ int main(int argc, char **argv)
 
 	op = ops;
 	while (op != NULL) {
-		dbg_printf(0, "Writing %s at 0x%X...\n", op->file_name, op->address);
+		/* TODO: Add support for read/write/format... ops */
+		/* TODO: Check if we have everything needed for this op */
+		switch (op->op_type) {
+			case OP_TYPE_DOWNLOAD:
+				dbg_printf(0, "Downloading %s to %s...\n", op->file_name, op->partition_name);
 
-		if (da_write_flash(fd_tty, op->address, op->file_name, da_packet_length_write, op->type, 0) < 0) {
-			fprintf(stderr, "Error: failed to flash %s (DA)\n", op->file_name);
-			ret = -1;
-			goto shutdown;
+				/* WARNING: preloader and preloader_backup downloads are expected in one chunk ! */
+				if (da_download_to_partition(fd_tty, op->partition_name, op->file_name, da_packet_length_write, 0) < 0) {
+					fprintf(stderr, "Error: failed to download %s (DA)\n", op->file_name);
+					ret = -1;
+					goto shutdown;
+				}
+
+				dbg_printf(0, "Successfully downloaded\n\n");
+				break;
+
+			case OP_TYPE_WRITE:
+				dbg_printf(0, "Writing %s at 0x%X...\n", op->file_name, op->address);
+
+				if (da_write_flash(fd_tty, op->address, op->file_name, op->type, da_packet_length_write, 0) < 0) {
+					fprintf(stderr, "Error: failed to write %s (DA)\n", op->file_name);
+					ret = -1;
+					goto shutdown;
+				}
+
+				dbg_printf(0, "Successfully written\n\n");
+				break;
+
+			case OP_TYPE_READ:
+				dbg_printf(0, "Unsupported read operation type\n\n");
+				break;
+
+			case OP_TYPE_FORMAT:
+				dbg_printf(0, "Unsupported format operation type\n\n");
+				break;
 		}
-
-		dbg_printf(0, "Successfully written\n\n");
 
 		op = op->next;
 	}
