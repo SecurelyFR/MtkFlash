@@ -1843,10 +1843,6 @@ int main(int argc, char **argv)
 		op = op->next;
 	}
 
-	//da_read_flash(fd_tty, 0x13e20000, 0x500000, read_buf, READ_BUF_SIZE, 0);
-
-	//while (1) receive_data(fd_tty, read_buf, READ_BUF_SIZE, 1, 0);
-
 shutdown:
 	dbg_printf(0, "Sending shutdown request...\n");
 	if (da_shutdown(fd_tty, 0) < 0) {
