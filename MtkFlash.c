@@ -102,6 +102,7 @@ typedef struct flash_op {
 	struct flash_op *next;
 	char *file_name;
 	size_t address;
+	size_t length;
 	partition_type_t type;
 	char *partition_name;
 	op_type_t op_type;
@@ -970,13 +971,20 @@ static size_t da_dev_ctrl_get(int fd, unsigned char *cmd, unsigned char *buf, si
 	return da_receive_data_check_status(fd, buf, buf_size, timeout_sec);
 }
 
-static int da_read_flash(int fd, size_t address, size_t length, unsigned char *buf, size_t buf_size, partition_type_t type, unsigned int timeout_sec)
+static int da_read_flash(int fd, size_t address, size_t length, char *file_name, partition_type_t type, unsigned int timeout_sec)
 {
+	FILE *f;
 	unsigned char params[56] = {0};
 	unsigned char ack[4] = {0};
-	unsigned char *read_buf = NULL;
+	unsigned char *buf = NULL;
 	size_t total_length = length;
 	size_t read_size;
+
+	f = fopen(file_name, "w");
+	if (f == NULL) {
+		fprintf(stderr, "Failed to open %s: %s\n", file_name, strerror (errno));
+		return -1;
+	}
 
 	/* TODO: support more storage */
 	/* Storage = EMMC */
@@ -1028,19 +1036,28 @@ static int da_read_flash(int fd, size_t address, size_t length, unsigned char *b
 	}
 
 	while (length > 0) {
-		read_size = da_receive_data(fd, &read_buf, 0, 0);
+		read_size = da_receive_data(fd, &buf, 0, 0);
 		if (length > read_size) {
 			length -= read_size;
 		} else {
 			length = 0;
 		}
 
-		/* TODO: Do something with the data received */
-
-		if (read_buf != NULL) {
-			free(read_buf);
-			read_buf = NULL;
+		if (buf == NULL) {
+			fprintf(stderr, "Error: Receive buffer is NULL\n");
+			fclose(f);
+			return -1;
 		}
+
+		if ((fwrite(buf, 1, read_size, f) < read_size)) {
+			fprintf(stderr, "Error: Failed to write file data: %s\n", strerror (errno));
+			free(buf);
+			fclose(f);
+			return -1;
+		}
+
+		free(buf);
+		buf = NULL;
 
 		/* Send an ACK and wait for the status */
 		if (da_send_data_check_status(fd, ack, sizeof(ack), timeout_sec, 0) < 0) {
@@ -1051,6 +1068,7 @@ static int da_read_flash(int fd, size_t address, size_t length, unsigned char *b
 		show_progress(total_length - length, total_length, 80);
 	}
 
+	fclose(f);
 	clear_progress();
 
 	return 0;
@@ -1405,15 +1423,17 @@ static void usage(FILE * fp, int argc, char **argv)
 		"\t-a | --addr <address>         The address where the file (given with -f) will be written (more than one can be added)\n"
 		"\t-n | --name <partition_name>  The name of the partition where the file (given with -f) will be written (more than one can be added)\n"
 		"\t-p | --type <partition_type>  The type of the partition to read or write (more than one can be added)\n"
+		"\t-l | --length <length>        The length in bytes of data to read (more than one can be added)\n"
 		"\t-D | --download               Download the file given with -f to the partition given with -n (more than one can be added)\n"
 		"\t-W | --write                  Write the file given with -f at the address given with -a using the partition type given with -p (more than one can be added)\n"
+		"\t-R | --read                   Read the amount of bytes given with -l from the address given with -a using the partition type given with -p to the file given with -f (more than one can be added)\n"
 		"\t-S | --shutdown               Try to send a shutdown command to the DA\n"
 		"\t-v | --verbose                Show more information like hex dump of the data (-vv and -vvv for even more details)\n"
 		"\t-h | --help                   Print this message\n",
 		argv[0], DEFAULT_TTY_PATH, DEFAULT_DA_PATH);
 }
 
-static const char short_options[] = "t:d:s:f:a:n:p:DWSvh";
+static const char short_options[] = "t:d:s:f:a:n:p:l:DWRSvh";
 
 static const struct option long_options[] = {
 	{"tty", required_argument, NULL, 't'},
@@ -1423,8 +1443,10 @@ static const struct option long_options[] = {
 	{"addr", required_argument, NULL, 'a'},
 	{"name", required_argument, NULL, 'n'},
 	{"type", required_argument, NULL, 'p'},
+	{"length", required_argument, NULL, 'l'},
 	{"download", no_argument, NULL, 'D'},
 	{"write", no_argument, NULL, 'W'},
+	{"read", no_argument, NULL, 'R'},
 	{"shutdown", no_argument, NULL, 'S'},
 	{"verbose", no_argument, NULL, 'v'},
 	{"help", no_argument, NULL, 'h'},
@@ -1488,12 +1510,20 @@ int main(int argc, char **argv)
 				ops->type = (partition_type_t) strtoul(optarg, NULL, 0);
 				break;
 
+			case 'l':
+				ops->length = strtoul(optarg, NULL, 0);
+				break;
+
 			case 'D':
 				ops->op_type = OP_TYPE_DOWNLOAD;
 				break;
 
 			case 'W':
 				ops->op_type = OP_TYPE_WRITE;
+				break;
+
+			case 'R':
+				ops->op_type = OP_TYPE_READ;
 				break;
 
 			case 'v':
@@ -1532,6 +1562,7 @@ int main(int argc, char **argv)
 				break;
 
 			case OP_TYPE_READ:
+				dbg_printf(1, "   Read %lu bytes to %s from 0x%X with partition type %u...\n", op->length, op->file_name, op->address, (unsigned int) op->type);
 				break;
 
 			case OP_TYPE_FORMAT:
@@ -1793,7 +1824,15 @@ int main(int argc, char **argv)
 				break;
 
 			case OP_TYPE_READ:
-				dbg_printf(0, "Unsupported read operation type\n\n");
+				dbg_printf(0, "Reading %lu bytes to %s from 0x%X...\n", op->length, op->file_name, op->address);
+
+				if (da_read_flash(fd_tty, op->address, op->length, op->file_name, op->type, 0) < 0) {
+					fprintf(stderr, "Error: failed to read to %s (DA)\n", op->file_name);
+					ret = -1;
+					goto shutdown;
+				}
+
+				dbg_printf(0, "Successfully read\n\n");
 				break;
 
 			case OP_TYPE_FORMAT:
