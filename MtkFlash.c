@@ -1575,43 +1575,61 @@ int main(int argc, char **argv)
 				break;
 
 			case 'f':
-				ops->file_name = strdup(optarg);
+				if (ops != NULL) {
+					ops->file_name = strdup(optarg);
+				}
 				break;
 
 			case 'a':
-				ops->address = strtoul(optarg, NULL, 0);
+				if (ops != NULL) {
+					ops->address = strtoul(optarg, NULL, 0);
+				}
 				break;
 
 			case 'n':
-				ops->partition_name = strdup(optarg);
+				if (ops != NULL) {
+					ops->partition_name = strdup(optarg);
+				}
 				break;
 
 			case 'p':
-				ops->type = (partition_type_t) strtoul(optarg, NULL, 0);
+				if (ops != NULL) {
+					ops->type = (partition_type_t) strtoul(optarg, NULL, 0);
+				}
 				break;
 
 			case 'l':
-				ops->length = strtoul(optarg, NULL, 0);
+				if (ops != NULL) {
+					ops->length = strtoul(optarg, NULL, 0);
+				}
 				break;
 
 			case 'D':
 				add_empty_flash_op(&ops);
-				ops->op_type = OP_TYPE_DOWNLOAD;
+				if (ops != NULL) {
+					ops->op_type = OP_TYPE_DOWNLOAD;
+				}
 				break;
 
 			case 'W':
 				add_empty_flash_op(&ops);
-				ops->op_type = OP_TYPE_WRITE;
+				if (ops != NULL) {
+					ops->op_type = OP_TYPE_WRITE;
+				}
 				break;
 
 			case 'R':
 				add_empty_flash_op(&ops);
-				ops->op_type = OP_TYPE_READ;
+				if (ops != NULL) {
+					ops->op_type = OP_TYPE_READ;
+				}
 				break;
 
 			case 'F':
 				add_empty_flash_op(&ops);
-				ops->op_type = OP_TYPE_FORMAT;
+				if (ops != NULL) {
+					ops->op_type = OP_TYPE_FORMAT;
+				}
 				break;
 
 			case 'v':
