@@ -971,6 +971,85 @@ static size_t da_dev_ctrl_get(int fd, unsigned char *cmd, unsigned char *buf, si
 	return da_receive_data_check_status(fd, buf, buf_size, timeout_sec);
 }
 
+static int da_format_flash(int fd, size_t address, size_t length, partition_type_t type, unsigned int timeout_sec)
+{
+	unsigned char params[56] = {0};
+	unsigned char ack[4] = {0};
+	unsigned char progress[4] = {0}; // Can be 2 or 4
+	unsigned char *progress_addr = progress;
+	unsigned int status;
+	size_t read_size;
+
+	/* TODO: support more storage */
+	/* Storage = EMMC */
+	params[0] = 0x01;
+	params[1] = 0x00;
+	params[2] = 0x00;
+	params[3] = 0x00;
+
+	/* Parttype */
+	params[4] = (unsigned int) type & 0xFF;
+	params[5] = 0x00;
+	params[6] = 0x00;
+	params[7] = 0x00;
+
+	/* Address */
+	params[8] = address & 0xFF;
+	params[9] = (address >> 8) & 0xFF;
+	params[10] = (address >> 16) & 0xFF;
+	params[11] = (address >> 24) & 0xFF;
+	params[12] = (address >> 32) & 0xFF;
+	params[13] = (address >> 40) & 0xFF;
+	params[14] = (address >> 48) & 0xFF;
+	params[15] = (address >> 56) & 0xFF;
+
+	/* Length */
+	params[16] = length & 0xFF;
+	params[17] = (length >> 8) & 0xFF;
+	params[18] = (length >> 16) & 0xFF;
+	params[19] = (length >> 24) & 0xFF;
+	params[20] = (length >> 32) & 0xFF;
+	params[21] = (length >> 40) & 0xFF;
+	params[22] = (length >> 48) & 0xFF;
+	params[23] = (length >> 56) & 0xFF;
+
+	if (da_send_data_check_status(fd, mtk_da_cmd_format, sizeof(mtk_da_cmd_format), timeout_sec, 0) < 0) {
+		fprintf(stderr, "Error: wrong status for mtk_da_cmd_format (DA)\n");
+		return -1;
+	}
+
+	// Nand extension params missing ?
+	if (da_send_data_check_status(fd, params, sizeof(params), timeout_sec, 0) < 0) {
+		fprintf(stderr, "Error: wrong status for mtk_da_cmd_format params (DA)\n");
+		return -1;
+	}
+
+	status = da_get_status(fd, timeout_sec);
+
+	while (status == 0x40040004) {
+		read_size = da_receive_data(fd, &progress_addr, 4, 0);
+		if (read_size != 4) {
+			fprintf(stderr, "Error: wrong size for progress\n");
+			return -1;
+		}
+
+		/* Send an ACK and wait for the status */
+		da_send_data(fd, ack, sizeof(ack), 0);
+		status = da_get_status(fd, timeout_sec);
+
+		show_progress((progress[0] | (progress[1] << 8) | (progress[2] << 16) | (progress[3] << 24)), 100, 80);
+	}
+
+	if (status != 0x40040005) {
+		fprintf(stderr, "Error: wrong final status for mtk_da_cmd_format (DA)\n");
+		return -1;
+	}
+
+	clear_progress();
+
+	return 0;
+}
+
 static int da_read_flash(int fd, size_t address, size_t length, char *file_name, partition_type_t type, unsigned int timeout_sec)
 {
 	FILE *f;
@@ -1427,13 +1506,14 @@ static void usage(FILE * fp, int argc, char **argv)
 		"\t-D | --download               Download the file given with -f to the partition given with -n (more than one can be added)\n"
 		"\t-W | --write                  Write the file given with -f at the address given with -a using the partition type given with -p (more than one can be added)\n"
 		"\t-R | --read                   Read the amount of bytes given with -l from the address given with -a using the partition type given with -p to the file given with -f (more than one can be added)\n"
+		"\t-F | --format                 Format the amount of bytes given with -l at the address given with -a using the partition type given with -p (more than one can be added)\n"
 		"\t-S | --shutdown               Try to send a shutdown command to the DA\n"
 		"\t-v | --verbose                Show more information like hex dump of the data (-vv and -vvv for even more details)\n"
 		"\t-h | --help                   Print this message\n",
 		argv[0], DEFAULT_TTY_PATH, DEFAULT_DA_PATH);
 }
 
-static const char short_options[] = "t:d:s:f:a:n:p:l:DWRSvh";
+static const char short_options[] = "t:d:s:f:a:n:p:l:DWRFSvh";
 
 static const struct option long_options[] = {
 	{"tty", required_argument, NULL, 't'},
@@ -1447,6 +1527,7 @@ static const struct option long_options[] = {
 	{"download", no_argument, NULL, 'D'},
 	{"write", no_argument, NULL, 'W'},
 	{"read", no_argument, NULL, 'R'},
+	{"format", no_argument, NULL, 'F'},
 	{"shutdown", no_argument, NULL, 'S'},
 	{"verbose", no_argument, NULL, 'v'},
 	{"help", no_argument, NULL, 'h'},
@@ -1494,7 +1575,6 @@ int main(int argc, char **argv)
 				break;
 
 			case 'f':
-				add_empty_flash_op(&ops);
 				ops->file_name = strdup(optarg);
 				break;
 
@@ -1515,15 +1595,23 @@ int main(int argc, char **argv)
 				break;
 
 			case 'D':
+				add_empty_flash_op(&ops);
 				ops->op_type = OP_TYPE_DOWNLOAD;
 				break;
 
 			case 'W':
+				add_empty_flash_op(&ops);
 				ops->op_type = OP_TYPE_WRITE;
 				break;
 
 			case 'R':
+				add_empty_flash_op(&ops);
 				ops->op_type = OP_TYPE_READ;
+				break;
+
+			case 'F':
+				add_empty_flash_op(&ops);
+				ops->op_type = OP_TYPE_FORMAT;
 				break;
 
 			case 'v':
@@ -1566,6 +1654,7 @@ int main(int argc, char **argv)
 				break;
 
 			case OP_TYPE_FORMAT:
+				dbg_printf(1, "   Format %lu bytes at 0x%X with partition type %u...\n", op->length, op->address, (unsigned int) op->type);
 				break;
 		}
 		op = op->next;
@@ -1812,7 +1901,7 @@ int main(int argc, char **argv)
 				break;
 
 			case OP_TYPE_WRITE:
-				dbg_printf(0, "Writing %s at 0x%X...\n", op->file_name, op->address);
+				dbg_printf(0, "Writing %s at 0x%lX...\n", op->file_name, op->address);
 
 				if (da_write_flash(fd_tty, op->address, op->file_name, op->type, da_packet_length_write, 0) < 0) {
 					fprintf(stderr, "Error: failed to write %s (DA)\n", op->file_name);
@@ -1824,7 +1913,7 @@ int main(int argc, char **argv)
 				break;
 
 			case OP_TYPE_READ:
-				dbg_printf(0, "Reading %lu bytes to %s from 0x%X...\n", op->length, op->file_name, op->address);
+				dbg_printf(0, "Reading %lu bytes to %s from 0x%lX...\n", op->length, op->file_name, op->address);
 
 				if (da_read_flash(fd_tty, op->address, op->length, op->file_name, op->type, 0) < 0) {
 					fprintf(stderr, "Error: failed to read to %s (DA)\n", op->file_name);
@@ -1836,7 +1925,15 @@ int main(int argc, char **argv)
 				break;
 
 			case OP_TYPE_FORMAT:
-				dbg_printf(0, "Unsupported format operation type\n\n");
+				dbg_printf(0, "Formatting %lu bytes at 0x%lX...\n", op->length, op->address);
+
+				if (da_format_flash(fd_tty, op->address, op->length, op->type, 0) < 0) {
+					fprintf(stderr, "Error: failed to format at 0x%lX (DA)\n", op->address);
+					ret = -1;
+					goto shutdown;
+				}
+
+				dbg_printf(0, "Successfully formatted\n\n");
 				break;
 		}
 
